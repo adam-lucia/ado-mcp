@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { ADOApiClient } from '../api/client/index.js';
 import { createError, ErrorCategory, handleApiError, normalizePaginationParams, PaginationParams } from '../api/utils/index.js';
 import { Tool, ToolDefinition } from './registry.js';
+import { WorkItemsQueryTool } from './work-items-query.tool.js';
 
 /**
  * Operation type for entity tools
@@ -703,6 +704,15 @@ export class EntityToolFactory {
     
     return new WorkItemsTool(apiClient);
   }
+  
+  /**
+   * Create a work items query tool
+   * This specialized tool enables querying work items with advanced filtering
+   * @param apiClient API client
+   * @returns Work items query tool
+   */
+  static createWorkItemsQueryTool = (apiClient: ADOApiClient): EntityTool =>
+    (new WorkItemsQueryTool(apiClient));
   
   /**
    * Create a pull requests tool

@@ -61,6 +61,7 @@ export class ToolRegistry {
       EntityToolFactory.createWorkItemsTool(this.apiClient),
       EntityToolFactory.createPullRequestsTool(this.apiClient),
       EntityToolFactory.createPipelinesTool(this.apiClient),
+      EntityToolFactory.createWorkItemsQueryTool(this.apiClient),
     ];
     
     // Register all core entity tools
