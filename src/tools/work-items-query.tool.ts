@@ -4,7 +4,7 @@
 import { z } from 'zod';
 import { ADOApiClient } from '../api/client/index.js';
 import { handleApiError, normalizePaginationParams } from '../api/utils/index.js';
-import { EntityTool } from './factory.js';
+import { EntityTool } from './entity-tool.base.js';
 
 /**
  * Work Items Query Tool for advanced work item filtering
