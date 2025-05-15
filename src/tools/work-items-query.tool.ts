@@ -19,21 +19,11 @@ export class WorkItemsQueryTool extends EntityTool {
       'query', 
       this.queryWorkItems.bind(this),
       z.object({
-        projectName: z.string().describe('Project name containing the work items'),
-        assignedTo: z.string().optional().describe('Filter by assigned user email/name'),
-        state: z.union([z.string(), z.array(z.string())]).optional()
-          .describe('Filter by work item states (e.g., "Active", "Closed")'),
-        workItemType: z.union([z.string(), z.array(z.string())]).optional()
-          .describe('Filter by work item types (e.g., "Bug", "Task")'),
-        tags: z.union([z.string(), z.array(z.string())]).optional()
-          .describe('Filter by work item tags'),
-        createdAfter: z.string().optional()
-          .describe('ISO date to filter by creation date (items created after this date)'),
-        createdBefore: z.string().optional()
-          .describe('ISO date to filter by creation date (items created before this date)'),
-        continuationToken: z.string().optional().describe('Token for pagination'),
-        maxResults: z.number().optional().describe('Maximum number of results to return (default: 25, max: 100)'),
-      }).strict(),
+        projectName: z.string(),
+        workItemType: z.union([z.string(), z.array(z.string())]).optional(),
+        state: z.union([z.string(), z.array(z.string())]).optional(),
+        assignedTo: z.string().optional()
+      }),
       'Query work items with advanced filtering and pagination support'
     );
   }
@@ -212,7 +202,7 @@ export class WorkItemsQueryTool extends EntityTool {
       }
 
       // Get work item details for the IDs returned by the query
-      const workItemIds = queryResult.workItems.map(wi => wi.id || 0).filter(id => id > 0);
+      const workItemIds = queryResult.workItems?.map(wi => wi.id || 0).filter(id => id > 0) || [];
       
       // If there are no work items, return empty result
       if (workItemIds.length === 0) {
