@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { ADOApiClient } from '../api/client/index.js';
 import { handleApiError, normalizePaginationParams, PaginationParams } from '../api/utils/index.js';
 import { WorkItemsQueryTool } from './work-items-query.tool.js';
+import { ReleaseNotesTool } from './release-notes.tool.js';
 import { EntityTool } from './entity-tool.base.js';
 
 /**
@@ -637,4 +638,12 @@ export class EntityToolFactory {
     
     return new PipelinesTool(apiClient);
   }
+  
+  /**
+   * Create a release notes tool
+   * @param apiClient API client
+   * @returns Release notes tool
+   */
+  static createReleaseNotesTool = (apiClient: ADOApiClient): EntityTool =>
+    (new ReleaseNotesTool(apiClient));
 }
