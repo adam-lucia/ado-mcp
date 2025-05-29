@@ -1,9 +1,10 @@
 /**
  * Azure DevOps MCP Server - Work Items Query Tool
  */
+import { WorkItemExpand } from 'azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js';
 import { z } from 'zod';
 import { ADOApiClient } from '../api/client/index.js';
-import { handleApiError, normalizePaginationParams } from '../api/utils/index.js';
+import { handleApiError } from '../api/utils/index.js';
 import { EntityTool } from './entity-tool.base.js';
 import { ServerResult } from '@modelcontextprotocol/sdk/types.js';
 
@@ -166,7 +167,8 @@ export class WorkItemsQueryTool extends EntityTool {
         'Custom.DataStructures', 'Custom.Interfaces', 'Custom.RiskAssessment',
         'Custom.ConfigChanges', 'Custom.AutomatedTests', 'Custom.BackoutPlan',
         'Custom.Comments'
-      ];      const expand = params.includeDetails ? 'relations' : undefined;
+      ];
+      const expand = params.includeDetails ? WorkItemExpand.Relations : undefined;
       const workItems = await workItemTrackingApi.getWorkItems(
         workItemIds.filter((id): id is number => id !== undefined),
         fields,
