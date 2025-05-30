@@ -12,26 +12,14 @@ import { EntityTool } from './entity-tool.base.js';
 export class ReleaseNotesTool extends EntityTool {
   constructor(apiClient: ADOApiClient) {
     super(apiClient, 'releaseNotes', 'Generate release notes in Excel format from Azure DevOps work items');
-    
-    // Register the export operation
+      // Register the export operation
     this.registerOperation(
       'exportToExcel', 
-      this.exportReleaseNotesToExcel.bind(this),      z.object({
+      this.exportReleaseNotesToExcel.bind(this),
+      z.object({
         sprintPath: z.string().describe('Full iteration path (e.g., "Sledgehammer\\Phase 12 (2025)\\Sprint 12.06 Apr 21")'),
         teamName: z.string().optional().describe('Full area path (e.g., "Sledgehammer\\Editor\\BearHawks")'),
-        outputPath: z.string().optional().describe('Output file path (defaults to current directory)'),
-        userInputs: z.object({
-          whichFlowsImpacted: z.string().optional().describe('Which flows impacted?'),
-          whichUserFunctionsImpacted: z.string().optional().describe('Which user functions impacted?'),
-          databaseChanges: z.string().optional().describe('Database changes?'),
-          persistedDataStructuresChanged: z.string().optional().describe('Persisted data structures changed?'),
-          interProcessInterfaces: z.string().optional().describe('Inter-process interfaces, message formats, or protocol changes?'),
-          configurationsChanged: z.string().optional().describe('Configurations changed?'),
-          descriptionOfConfigChanges: z.string().optional().describe('Description of Configuration Changes'),
-          automatedTestsWritten: z.string().optional().describe('Automated tests written, updated, or covering new or changed code\'s functionality?'),
-          backOutGamePlan: z.string().optional().describe('Back out game plan'),
-          comments: z.string().optional().describe('Comments')
-        }).optional().describe('User-provided inputs for manual fields')
+        outputPath: z.string().optional().describe('Output file path (defaults to current directory)')
       }).strict(),
       'Export release notes for a sprint and team to Excel format with all required columns'
     );
@@ -42,7 +30,7 @@ export class ReleaseNotesTool extends EntityTool {
    * @returns Array of example strings
    */  protected generateExamples(): string[] {
     return [
-      '```json\n{\n  "operation": "exportToExcel",\n  "exportToExcelParams": {\n    "sprintPath": "Sledgehammer\\\\Phase 12 (2025)\\\\Sprint 12.06 Apr 21",\n    "teamName": "Sledgehammer\\\\Editor\\\\BearHawks",\n    "outputPath": "C:\\\\temp\\\\release-notes.xlsx",\n    "userInputs": {\n      "whichFlowsImpacted": "Login, Payment Processing",\n      "databaseChanges": "Added new user_preferences table"\n    }\n  }\n}\n```\nExport release notes for Sprint 12.06 and team BearHawks to Excel with user inputs'
+      '```json\n{\n  "operation": "exportToExcel",\n  "exportToExcelParams": {\n    "sprintPath": "Sledgehammer\\\\Phase 12 (2025)\\\\Sprint 12.06 Apr 21",\n    "teamName": "Sledgehammer\\\\Editor\\\\BearHawks",\n    "outputPath": "C:\\\\temp\\\\release-notes.xlsx"\n  }\n}\n```\nExport release notes for Sprint 12.06 and team BearHawks to Excel format'
     ];
   }
   
@@ -52,18 +40,6 @@ export class ReleaseNotesTool extends EntityTool {
     sprintPath: string;
     teamName?: string;
     outputPath?: string;
-    userInputs?: {
-      whichFlowsImpacted?: string;
-      whichUserFunctionsImpacted?: string;
-      databaseChanges?: string;
-      persistedDataStructuresChanged?: string;
-      interProcessInterfaces?: string;
-      configurationsChanged?: string;
-      descriptionOfConfigChanges?: string;
-      automatedTestsWritten?: string;
-      backOutGamePlan?: string;
-      comments?: string;
-    };
   }): Promise<any> {
     try {
       // Get work items for the sprint and team
@@ -111,10 +87,9 @@ export class ReleaseNotesTool extends EntityTool {
         type: 'pattern',
         pattern: 'solid',
         fgColor: { argb: 'FFE0E0E0' }
-      };
-        // Process each work item
+      };      // Process each work item
       for (const workItem of workItems) {
-        const enrichedData = await this.enrichWorkItemData(workItem, params.userInputs);
+        const enrichedData = await this.enrichWorkItemData(workItem);
         worksheet.addRow(enrichedData);
       }
       
@@ -179,10 +154,10 @@ export class ReleaseNotesTool extends EntityTool {
       throw handleApiError(error, 'ReleaseNotesTool', 'getWorkItemsForSprint');
     }
   }
-    /**
+  /**
    * Enrich work item data with additional information
    */
-  private async enrichWorkItemData(workItem: any, userInputs?: any): Promise<any> {
+  private async enrichWorkItemData(workItem: any): Promise<any> {
     const fields = workItem.fields || {};
     const relations = workItem.relations || [];
     
@@ -200,8 +175,7 @@ export class ReleaseNotesTool extends EntityTool {
     
     // Get risk assessment from custom field
     const riskAssessment = this.getRiskAssessment(fields);
-    
-    return {
+      return {
       releaseVersion: releaseVersion,
       parentWorkItemId: parentInfo.id || '',
       parentWorkItemType: parentInfo.type || '',
@@ -209,18 +183,18 @@ export class ReleaseNotesTool extends EntityTool {
       toggle: featureFlag,
       reposChanged: prInfo.repos.join(', '),
       authors: prInfo.authors.join(', '),
-      whichFlowsImpacted: userInputs?.whichFlowsImpacted || '',
-      whichUserFunctionsImpacted: userInputs?.whichUserFunctionsImpacted || '',
-      databaseChanges: userInputs?.databaseChanges || '',
-      persistedDataStructuresChanged: userInputs?.persistedDataStructuresChanged || '',
-      interProcessInterfaces: userInputs?.interProcessInterfaces || '',
+      whichFlowsImpacted: '',
+      whichUserFunctionsImpacted: '',
+      databaseChanges: '',
+      persistedDataStructuresChanged: '',
+      interProcessInterfaces: '',
       devRiskAssessment: riskAssessment,
-      configurationsChanged: userInputs?.configurationsChanged || '',
-      descriptionOfConfigChanges: userInputs?.descriptionOfConfigChanges || '',
-      automatedTestsWritten: userInputs?.automatedTestsWritten || '',
-      backOutGamePlan: userInputs?.backOutGamePlan || '',
-      comments: userInputs?.comments || ''
-    };  }
+      configurationsChanged: '',
+      descriptionOfConfigChanges: '',
+      automatedTestsWritten: '',
+      backOutGamePlan: '',
+      comments: ''
+    };}
   
   /**
    * Extract release version from work item fields

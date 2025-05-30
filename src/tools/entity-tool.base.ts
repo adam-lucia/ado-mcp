@@ -120,8 +120,7 @@ export abstract class EntityTool implements Tool {
   protected generateExamples(): string[] {
     return [];
   }
-  
-  /**
+    /**
    * Generate schema description from Zod schema
    * @param schema Zod schema
    * @returns Schema description
@@ -141,46 +140,72 @@ export abstract class EntityTool implements Tool {
       for (const [key, value] of Object.entries(shape)) {
         const fieldDef = (value as any)._def;
         
-        // Check if required
-        if (!('isOptional' in fieldDef)) {
+        // Check if required (handle optional and nullable types)
+        const isOptional = fieldDef.typeName === 'ZodOptional' || 
+                          (fieldDef.innerType && fieldDef.innerType._def.typeName === 'ZodOptional');
+        
+        if (!isOptional) {
           required.push(key);
         }
+        
+        // Get the actual type, unwrapping optional/nullable wrappers
+        let actualType = value as any;
+        if (fieldDef.typeName === 'ZodOptional' && fieldDef.innerType) {
+          actualType = fieldDef.innerType;
+        }
+        const actualDef = actualType._def;
         
         // Get property type and description
         let type = 'string';
         let description = '';
         let enumValues: any[] | undefined = undefined;
+        let nestedProperties: Record<string, any> | undefined = undefined;
+        let nestedRequired: string[] | undefined = undefined;
         
-        if (fieldDef.typeName === 'ZodString') {
+        if (actualDef.typeName === 'ZodString') {
           type = 'string';
-        } else if (fieldDef.typeName === 'ZodNumber') {
+        } else if (actualDef.typeName === 'ZodNumber') {
           type = 'number';
-        } else if (fieldDef.typeName === 'ZodBoolean') {
+        } else if (actualDef.typeName === 'ZodBoolean') {
           type = 'boolean';
-        } else if (fieldDef.typeName === 'ZodArray') {
+        } else if (actualDef.typeName === 'ZodArray') {
           type = 'array';
-        } else if (fieldDef.typeName === 'ZodObject') {
+        } else if (actualDef.typeName === 'ZodObject') {
           type = 'object';
-        } else if (fieldDef.typeName === 'ZodEnum') {
+          // Recursively process nested object
+          const nestedSchema = this.generateSchemaDescription(actualType);
+          nestedProperties = nestedSchema.properties;
+          nestedRequired = nestedSchema.required;
+        } else if (actualDef.typeName === 'ZodEnum') {
           type = 'string';
-          enumValues = fieldDef.values;
+          enumValues = actualDef.values;
         }
         
         // Get description from metadata
-        if ((value as any).description) {
-          description = (value as any).description;
+        if (actualType.description) {
+          description = actualType.description;
         }
         
         // Create property definition
-        properties[key] = {
+        const propertyDef: any = {
           type,
           description,
         };
         
         // Add enum values if available
         if (enumValues) {
-          properties[key].enum = enumValues;
+          propertyDef.enum = enumValues;
         }
+        
+        // Add nested properties for objects
+        if (nestedProperties) {
+          propertyDef.properties = nestedProperties;
+          if (nestedRequired && nestedRequired.length > 0) {
+            propertyDef.required = nestedRequired;
+          }
+        }
+        
+        properties[key] = propertyDef;
       }
       
       return { properties, required };
@@ -194,9 +219,11 @@ export abstract class EntityTool implements Tool {
    * Execute the tool
    * @param args Tool arguments
    * @returns Tool result
-   */
-  async execute(args: unknown): Promise<any> {
+   */  async execute(args: unknown): Promise<any> {
     try {
+      // Add debugging to see what's being passed
+      console.log('EntityTool.execute called with args:', JSON.stringify(args, null, 2));
+      
       // Validate basic structure
       const baseSchema = z.object({
         operation: z.string(),
