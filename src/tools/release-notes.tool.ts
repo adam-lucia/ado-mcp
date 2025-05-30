@@ -1,375 +1,367 @@
-/**
- * Azure DevOps MCP Server - Release Notes Tool
- * Generates detailed release notes for work items
- */
-
-import { ADOApiClient } from '../api/client/index.js';
-import { EntityTool } from './entity-tool.base.js';
 import { z } from 'zod';
-import { McpError, ErrorCode, type Result } from '@modelcontextprotocol/sdk/types.js';
-import { WorkItemsQueryTool } from './work-items-query.tool.js';
-
-interface WorkItemFields {
-  'System.Title'?: string;
-  'System.WorkItemType'?: string;
-  'System.State'?: string;
-  'System.Parent'?: number;
-  'Custom.ReleaseVersion'?: string;
-  'Custom.FeatureFlag'?: string;
-  'Custom.PRODtoggle'?: string;
-  'Custom.DEMOtoggle'?: string;
-  'System.AssignedTo'?: { displayName: string };
-  'System.Description'?: string;
-  'Custom.FlowsImpacted'?: string;
-  'Custom.UserFunctionsImpacted'?: string;
-  'Custom.DatabaseChanges'?: string;
-  'Custom.DataStructuresChanged'?: string;
-  'Custom.InterfaceChanges'?: string;
-  'Custom.Risk'?: string;
-  'Custom.ConfigurationChanges'?: string;
-  'Custom.AutomatedTests'?: string;
-  'Custom.BackoutPlan'?: string;
-  'Custom.Comments'?: string;
-  'System.CreatedDate'?: string;
-  'System.ClosedDate'?: string;
-  [key: string]: string | number | { displayName: string } | undefined;
-}
-
-interface WorkItemResult {
-  id: number;
-  fields: WorkItemFields;
-  relations?: Array<{
-    rel: string;
-    url?: string;
-    attributes?: {
-      name?: string;
-    };
-  }>;
-}
-
-interface ReleaseNoteWorkItem {
-  id: number;
-  title: string;
-  type: string;
-  state: string;
-  releaseVersion?: string;
-  parent?: {
-    id: number;
-    type: string;
-    title: string;
-  };
-  toggle?: string;
-  reposChanged: string[];
-  authors: string[];
-  flowsImpacted?: string;
-  userFunctionsImpacted?: string;
-  databaseChanges?: string;
-  dataStructuresChanged?: string;
-  interfaceChanges?: string;
-  riskAssessment?: string;
-  configurationChanges?: string;
-  automatedTests?: string;
-  backoutPlan?: string;
-  comments?: string;
-  createdDate?: string;
-  closedDate?: string;
-}
+import ExcelJS from 'exceljs';
+import * as path from 'path';
+import { WorkItemExpand } from 'azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js';
+import { ADOApiClient } from '../api/client/index.js';
+import { handleApiError } from '../api/utils/index.js';
+import { EntityTool } from './entity-tool.base.js';
 
 /**
- * Tool for generating detailed release notes from work items
+ * Release Notes Tool for exporting Azure DevOps work items to Excel format
  */
 export class ReleaseNotesTool extends EntityTool {
-  private workItemsQueryTool: WorkItemsQueryTool;
-
   constructor(apiClient: ADOApiClient) {
-    super(apiClient, 'releaseNotes', 'Generate detailed release notes from work items');
-
-    this.workItemsQueryTool = new WorkItemsQueryTool(apiClient);
-
-    // Register operations
+    super(apiClient, 'releaseNotes', 'Generate release notes in Excel format from Azure DevOps work items');
+    
+    // Register the export operation
     this.registerOperation(
-      'generate',
-      this.generateReleaseNotes.bind(this),
-      z.object({
-        projectName: z.string(),
-        workItemId: z.number().optional(),
-        iterationPath: z.string().optional(),
-        includeDetails: z.boolean().optional().default(true),
-      }),
-      'Generate detailed release notes for a work item or all work items in a sprint'
+      'exportToExcel', 
+      this.exportReleaseNotesToExcel.bind(this),      z.object({
+        sprintPath: z.string().describe('Full iteration path (e.g., "Sledgehammer\\Phase 12 (2025)\\Sprint 12.06 Apr 21")'),
+        teamName: z.string().optional().describe('Full area path (e.g., "Sledgehammer\\Editor\\BearHawks")'),
+        outputPath: z.string().optional().describe('Output file path (defaults to current directory)'),
+        userInputs: z.object({
+          whichFlowsImpacted: z.string().optional().describe('Which flows impacted?'),
+          whichUserFunctionsImpacted: z.string().optional().describe('Which user functions impacted?'),
+          databaseChanges: z.string().optional().describe('Database changes?'),
+          persistedDataStructuresChanged: z.string().optional().describe('Persisted data structures changed?'),
+          interProcessInterfaces: z.string().optional().describe('Inter-process interfaces, message formats, or protocol changes?'),
+          configurationsChanged: z.string().optional().describe('Configurations changed?'),
+          descriptionOfConfigChanges: z.string().optional().describe('Description of Configuration Changes'),
+          automatedTestsWritten: z.string().optional().describe('Automated tests written, updated, or covering new or changed code\'s functionality?'),
+          backOutGamePlan: z.string().optional().describe('Back out game plan'),
+          comments: z.string().optional().describe('Comments')
+        }).optional().describe('User-provided inputs for manual fields')
+      }).strict(),
+      'Export release notes for a sprint and team to Excel format with all required columns'
     );
-
-    this.registerOperation(
-      'exportCsv',
-      this.exportReleaseNotesCSV.bind(this),
-      z.object({
-        projectName: z.string(),
-        workItemId: z.number().optional(),
-        iterationPath: z.string().optional(),
-      }),
-      'Export release notes data in CSV format'
-    );
-  }
-
-  /**
-   * Generate release notes for work items
-   */
-  async generateReleaseNotes(params: {
-    projectName: string,
-    workItemId?: number,
-    iterationPath?: string,
-    includeDetails?: boolean
-  }): Promise<Result> {
-    try {
-      // Query for work items using WorkItemsQueryTool with additional filtering
-      const queryParams = {
-        projectName: params.projectName,
-        workItemId: params.workItemId,
-        iterationPath: params.iterationPath,
-        workItemType: params.workItemId ? undefined : ['User Story', 'Bug', 'Task'],
-        includeDetails: params.includeDetails ?? true,
-        fields: [
-          'System.Title',
-          'System.WorkItemType',
-          'System.State',
-          'System.Parent',
-          'Custom.ReleaseVersion',
-          'Custom.FeatureFlag',
-          'Custom.PRODtoggle',
-          'Custom.DEMOtoggle',
-          'System.AssignedTo',
-          'Custom.FlowsImpacted',
-          'Custom.UserFunctionsImpacted',
-          'Custom.DatabaseChanges',
-          'Custom.DataStructuresChanged',
-          'Custom.InterfaceChanges',
-          'Custom.Risk',
-          'Custom.ConfigurationChanges',
-          'Custom.AutomatedTests',
-          'Custom.BackoutPlan',
-          'Custom.Comments',
-          'System.CreatedDate',
-          'System.ClosedDate'
-        ],
-        state: params.workItemId ? undefined : ['Closed', 'Done']
-      };
-
-      const workItemResult = await this.workItemsQueryTool.queryWorkItems(queryParams) as Result;
-      const queryResult = workItemResult.result as { workItems: WorkItemResult[]; count: number };
-
-      if (!queryResult?.workItems?.length) {
-        return {
-          result: {
-            workItems: [],
-            count: 0
-          }
-        };
-      }
-
-      // Transform work items into release notes format with proper field mapping
-      const releaseNotes = await Promise.all(queryResult.workItems.map(async (item: WorkItemResult) => {
-        // Get parent details if available
-        let parent;
-        const parentId = item.fields['System.Parent'];
-        if (parentId) {
-          const parentResult = await this.workItemsQueryTool.queryWorkItems({
-            projectName: params.projectName,
-            workItemId: parentId,
-            includeDetails: true
-          }) as Result;
-          const parentData = parentResult.result as { workItems: WorkItemResult[]; count: number };
-          const parentWorkItem = parentData.workItems?.[0];
-          if (parentWorkItem) {
-            parent = {
-              id: parentId,
-              type: parentWorkItem.fields['System.WorkItemType'] || '',
-              title: parentWorkItem.fields['System.Title'] || ''
-            };
-          }
-        }
-
-        // Extract PR numbers from relations
-        const prs = item.relations
-          ?.filter(r => r.rel === 'ArtifactLink' && r.attributes?.name === 'GitHub Pull Request')
-          .map(r => r.url?.split('/').pop() || '')
-          .filter(Boolean) || [];
-
-        return {
-          id: item.id,
-          title: item.fields['System.Title'] || '',
-          type: item.fields['System.WorkItemType'] || '',
-          state: item.fields['System.State'] || '',
-          releaseVersion: this.extractField(item.fields, 'Custom.ReleaseVersion'),
-          parent,
-          toggle: this.extractToggle(item.fields),
-          reposChanged: prs,
-          authors: [item.fields['System.AssignedTo']?.displayName || ''].filter(Boolean),
-          flowsImpacted: this.extractField(item.fields, 'Custom.FlowsImpacted'),
-          userFunctionsImpacted: this.extractField(item.fields, 'Custom.UserFunctionsImpacted'),
-          databaseChanges: this.extractField(item.fields, 'Custom.DatabaseChanges'),
-          dataStructuresChanged: this.extractField(item.fields, 'Custom.DataStructuresChanged'),
-          interfaceChanges: this.extractField(item.fields, 'Custom.InterfaceChanges'),
-          riskAssessment: this.extractField(item.fields, 'Custom.Risk') || '3',
-          configurationChanges: this.extractField(item.fields, 'Custom.ConfigurationChanges'),
-          automatedTests: this.extractField(item.fields, 'Custom.AutomatedTests'),
-          backoutPlan: this.extractField(item.fields, 'Custom.BackoutPlan'),
-          comments: this.extractField(item.fields, 'Custom.Comments'),
-          createdDate: this.extractField(item.fields, 'System.CreatedDate'),
-          closedDate: this.extractField(item.fields, 'System.ClosedDate')
-        };
-      }));
-
-      return {
-        result: {
-          workItems: releaseNotes,
-          count: releaseNotes.length
-        }
-      };
-    } catch (error) {
-      throw error instanceof Error 
-        ? error 
-        : new Error('Failed to generate release notes: ' + String(error));
-    }
-  }
-
-  /**
-   * Helper method to safely extract a field value from work item fields
-   */
-  private extractField(fields: WorkItemFields, fieldName: string): string {
-    const value = fields[fieldName];
-    return value ? String(value).trim() : '';
-  }
-
-  /**
-   * Helper method to extract and combine toggle information
-   */
-  private extractToggle(fields: WorkItemFields): string {
-    const toggleFields = ['Custom.FeatureFlag', 'Custom.PRODtoggle', 'Custom.DEMOtoggle'];
-    for (const field of toggleFields) {
-      const value = this.extractField(fields, field);
-      if (value) return value;
-    }
-    return '';
-  }
-
-  /**
-   * Export release notes in CSV format
-   */
-  async exportReleaseNotesCSV(params: {
-    projectName: string,
-    workItemId?: number,
-    iterationPath?: string
-  }): Promise<Result> {
-    try {
-      // Get release notes data
-      const releaseNotesResult = await this.generateReleaseNotes({
-        ...params,
-        includeDetails: true
-      });
-
-      const releaseNotes = (releaseNotesResult.result as { workItems: ReleaseNoteWorkItem[]; count: number });
-      if (!releaseNotes?.workItems?.length) {
-        return {
-          result: {
-            csv: '',
-            count: 0
-          }
-        };
-      }
-
-      // Define CSV headers
-      const headers = [
-        'ID',
-        'Title',
-        'Type',
-        'State',
-        'Release Version',
-        'Parent ID',
-        'Parent Type',
-        'Parent Title',
-        'Toggle',
-        'Repositories Changed',
-        'Authors',
-        'Flows Impacted',
-        'User Functions Impacted',
-        'Database Changes',
-        'Data Structures Changed',
-        'Interface Changes',
-        'Risk Assessment',
-        'Configuration Changes',
-        'Automated Tests',
-        'Back Out Plan',
-        'Comments',
-        'Created Date',
-        'Closed Date'
-      ];
-
-      // Convert data to rows
-      const rows = releaseNotes.workItems.map((item: ReleaseNoteWorkItem) => [
-        item.id,
-        item.title,
-        item.type,
-        item.state,
-        item.releaseVersion || '',
-        item.parent?.id || '',
-        item.parent?.type || '',
-        item.parent?.title || '',
-        item.toggle || '',
-        item.reposChanged.join(', '),
-        item.authors.join(', '),
-        item.flowsImpacted || '',
-        item.userFunctionsImpacted || '',
-        item.databaseChanges || '',
-        item.dataStructuresChanged || '',
-        item.interfaceChanges || '',
-        item.riskAssessment || '',
-        item.configurationChanges || '',
-        item.automatedTests || '',
-        item.backoutPlan || '',
-        item.comments || '',
-        item.createdDate || '',
-        item.closedDate || ''
-      ]);
-
-      // Generate CSV content with proper escaping
-      const csvContent = [
-        headers.map(header => this.escapeCsvField(header)).join(','),
-        ...rows.map((row) => row.map((cell) => this.escapeCsvField(String(cell))).join(','))
-      ].join('\n');
-
-      return {
-        result: {
-          csv: csvContent,
-          count: rows.length
-        }
-      };
-    } catch (error) {
-      throw error instanceof Error 
-        ? error 
-        : new Error('Failed to export release notes to CSV: ' + String(error));
-    }
-  }
-
-  /**
-   * Helper method to escape CSV field values
-   */
-  private escapeCsvField(value: string): string {
-    if (value.includes('"') || value.includes(',') || value.includes('\n')) {
-      return `"${value.replace(/"/g, '""')}"`;
-    }
-    return value;
   }
   
   /**
    * Generate examples for the release notes tool
-   */
-  protected generateExamples(): string[] {
+   * @returns Array of example strings
+   */  protected generateExamples(): string[] {
     return [
-      '```json\n{\n  "operation": "generate",\n  "generateParams": {\n    "projectName": "Sledgehammer",\n    "workItemId": 342129\n  }\n}\n```\nGenerate detailed release notes for work item #342129',
-      
-      '```json\n{\n  "operation": "generate",\n  "generateParams": {\n    "projectName": "Sledgehammer",\n    "iterationPath": "Sledgehammer\\\\Phase 12 (2025)\\\\Sprint 12.06 Apr 21"\n  }\n}\n```\nGenerate release notes for Sprint 12.06',
-      
-      '```json\n{\n  "operation": "exportCsv",\n  "exportCsvParams": {\n    "projectName": "Sledgehammer",\n    "workItemId": 342129\n  }\n}\n```\nExport CSV release notes for work item #342129'
+      '```json\n{\n  "operation": "exportToExcel",\n  "exportToExcelParams": {\n    "sprintPath": "Sledgehammer\\\\Phase 12 (2025)\\\\Sprint 12.06 Apr 21",\n    "teamName": "Sledgehammer\\\\Editor\\\\BearHawks",\n    "outputPath": "C:\\\\temp\\\\release-notes.xlsx",\n    "userInputs": {\n      "whichFlowsImpacted": "Login, Payment Processing",\n      "databaseChanges": "Added new user_preferences table"\n    }\n  }\n}\n```\nExport release notes for Sprint 12.06 and team BearHawks to Excel with user inputs'
     ];
+  }
+  
+  /**
+   * Export release notes to Excel format
+   */  async exportReleaseNotesToExcel(params: {
+    sprintPath: string;
+    teamName?: string;
+    outputPath?: string;
+    userInputs?: {
+      whichFlowsImpacted?: string;
+      whichUserFunctionsImpacted?: string;
+      databaseChanges?: string;
+      persistedDataStructuresChanged?: string;
+      interProcessInterfaces?: string;
+      configurationsChanged?: string;
+      descriptionOfConfigChanges?: string;
+      automatedTestsWritten?: string;
+      backOutGamePlan?: string;
+      comments?: string;
+    };
+  }): Promise<any> {
+    try {
+      // Get work items for the sprint and team
+      const workItems = await this.getWorkItemsForSprint(params.sprintPath, params.teamName);
+      
+      if (workItems.length === 0) {
+        return {
+          success: false,
+          message: `No work items found for sprint path: ${params.sprintPath}`,
+          filePath: null
+        };
+      }
+      
+      // Create Excel workbook
+      const workbook = new ExcelJS.Workbook();
+      const worksheet = workbook.addWorksheet('Release Notes');
+      
+      // Define columns
+      const columns = [
+        { header: 'Release Version', key: 'releaseVersion', width: 15 },
+        { header: 'Parent Work Item ID', key: 'parentWorkItemId', width: 20 },
+        { header: 'Parent Work Item Type', key: 'parentWorkItemType', width: 20 },
+        { header: 'Parent Work Item Title', key: 'parentWorkItemTitle', width: 40 },
+        { header: 'Toggle (FeatureFlag)', key: 'toggle', width: 20 },
+        { header: 'Repos Changed', key: 'reposChanged', width: 30 },
+        { header: 'Authors', key: 'authors', width: 30 },
+        { header: 'Which flows impacted?', key: 'whichFlowsImpacted', width: 30 },
+        { header: 'Which user functions impacted?', key: 'whichUserFunctionsImpacted', width: 30 },
+        { header: 'Database changes?', key: 'databaseChanges', width: 20 },
+        { header: 'Persisted data structures changed?', key: 'persistedDataStructuresChanged', width: 30 },
+        { header: 'Inter-process interfaces, message formats, or protocol changes?', key: 'interProcessInterfaces', width: 40 },
+        { header: 'Dev risk assessment 1-3?', key: 'devRiskAssessment', width: 20 },
+        { header: 'Configurations changed?', key: 'configurationsChanged', width: 20 },
+        { header: 'Description of Configuration Changes', key: 'descriptionOfConfigChanges', width: 40 },
+        { header: 'Automated tests written, updated, or covering new or changed code\'s functionality?', key: 'automatedTestsWritten', width: 50 },
+        { header: 'Back out game plan', key: 'backOutGamePlan', width: 40 },
+        { header: 'Comments', key: 'comments', width: 40 }
+      ];
+      
+      worksheet.columns = columns;
+      
+      // Style the header row
+      worksheet.getRow(1).font = { bold: true };
+      worksheet.getRow(1).fill = {
+        type: 'pattern',
+        pattern: 'solid',
+        fgColor: { argb: 'FFE0E0E0' }
+      };
+        // Process each work item
+      for (const workItem of workItems) {
+        const enrichedData = await this.enrichWorkItemData(workItem, params.userInputs);
+        worksheet.addRow(enrichedData);
+      }
+      
+      // Determine output path
+      const outputPath = params.outputPath || path.join(process.cwd(), `release-notes-${Date.now()}.xlsx`);
+      
+      // Write the file
+      await workbook.xlsx.writeFile(outputPath);
+      
+      return {
+        success: true,
+        message: `Release notes exported successfully to ${outputPath}`,
+        filePath: outputPath,
+        workItemsCount: workItems.length
+      };
+      
+    } catch (error) {
+      throw handleApiError(error, 'ReleaseNotesTool', 'exportReleaseNotesToExcel');
+    }
+  }
+    /**
+   * Get work items for a specific sprint
+   */  private async getWorkItemsForSprint(sprintPath: string, teamName?: string): Promise<any[]> {
+    try {
+      const workItemApi = await this.apiClient.getWorkItemTrackingApi();
+      
+      // Build WIQL query with exact path matching
+      // For sprintPath: expect full iteration path like 'Sledgehammer\Phase 12 (2025)\Sprint 12.06 Apr 21'
+      // For teamName: expect full area path like 'Sledgehammer\Editor\BearHawks'
+      let whereClause = `[System.IterationPath] = '${sprintPath}'`;
+      
+      if (teamName) {
+        whereClause += ` AND [System.AreaPath] = '${teamName}'`;
+      }
+      
+      const wiqlQuery = {
+        query: `SELECT [System.Id], [System.Title], [System.WorkItemType], [System.State], [System.AssignedTo], [System.IterationPath], [System.AreaPath]
+                FROM WorkItems 
+                WHERE ${whereClause}
+                AND [System.WorkItemType] IN ('User Story', 'Bug', 'Task', 'Feature', 'Epic')
+                ORDER BY [System.Id]`
+      };
+      
+      console.log('WIQL Query:', wiqlQuery.query);
+      
+      const queryResult = await workItemApi.queryByWiql(wiqlQuery);
+      
+      if (!queryResult.workItems || queryResult.workItems.length === 0) {
+        console.log('No work items found for query');
+        return [];
+      }
+      
+      console.log(`Found ${queryResult.workItems.length} work items`);
+      
+      // Get detailed work item data
+      const workItemIds = queryResult.workItems.map(wi => wi.id).filter((id): id is number => id !== undefined);
+      const workItems = await workItemApi.getWorkItems(workItemIds, undefined, undefined, WorkItemExpand.Relations);
+      
+      return workItems;
+    } catch (error) {
+      console.error('Error getting work items:', error);
+      throw handleApiError(error, 'ReleaseNotesTool', 'getWorkItemsForSprint');
+    }
+  }
+    /**
+   * Enrich work item data with additional information
+   */
+  private async enrichWorkItemData(workItem: any, userInputs?: any): Promise<any> {
+    const fields = workItem.fields || {};
+    const relations = workItem.relations || [];
+    
+    // Get release version from work item fields
+    const releaseVersion = this.getReleaseVersion(fields);
+    
+    // Get parent work item information
+    const parentInfo = await this.getParentWorkItemInfo(relations);
+    
+    // Get feature flag information
+    const featureFlag = this.getFeatureFlagInfo(fields);
+    
+    // Get repository and author information from linked PRs
+    const prInfo = await this.getPullRequestInfo(relations);
+    
+    // Get risk assessment from custom field
+    const riskAssessment = this.getRiskAssessment(fields);
+    
+    return {
+      releaseVersion: releaseVersion,
+      parentWorkItemId: parentInfo.id || '',
+      parentWorkItemType: parentInfo.type || '',
+      parentWorkItemTitle: parentInfo.title || '',
+      toggle: featureFlag,
+      reposChanged: prInfo.repos.join(', '),
+      authors: prInfo.authors.join(', '),
+      whichFlowsImpacted: userInputs?.whichFlowsImpacted || '',
+      whichUserFunctionsImpacted: userInputs?.whichUserFunctionsImpacted || '',
+      databaseChanges: userInputs?.databaseChanges || '',
+      persistedDataStructuresChanged: userInputs?.persistedDataStructuresChanged || '',
+      interProcessInterfaces: userInputs?.interProcessInterfaces || '',
+      devRiskAssessment: riskAssessment,
+      configurationsChanged: userInputs?.configurationsChanged || '',
+      descriptionOfConfigChanges: userInputs?.descriptionOfConfigChanges || '',
+      automatedTestsWritten: userInputs?.automatedTestsWritten || '',
+      backOutGamePlan: userInputs?.backOutGamePlan || '',
+      comments: userInputs?.comments || ''
+    };  }
+  
+  /**
+   * Extract release version from work item fields
+   */
+  private getReleaseVersion(fields: any): string {
+    // Look for common release version field names
+    const releaseVersionFields = [
+      'Custom.ReleaseVersion',
+      'Microsoft.VSTS.Common.ReleaseVersion',
+      'ReleaseVersion',
+      'Release',
+      'Version',
+      'Custom.Version',
+      'Microsoft.VSTS.Build.FoundIn',
+      'Microsoft.VSTS.Build.IntegrationBuild'
+    ];
+    
+    for (const fieldName of releaseVersionFields) {
+      if (fields[fieldName]) {
+        return fields[fieldName].toString();
+      }
+    }
+    
+    return '';
+  }
+  
+  /**
+   * Get parent work item information from relations
+   */
+  private async getParentWorkItemInfo(relations: any[]): Promise<{ id: string; type: string; title: string }> {
+    try {
+      const parentRelation = relations.find(rel => 
+        rel.rel === 'System.LinkTypes.Hierarchy-Reverse' || 
+        rel.attributes?.name === 'Parent'
+      );
+      
+      if (!parentRelation || !parentRelation.url) {
+        return { id: '', type: '', title: '' };
+      }
+      
+      // Extract work item ID from URL
+      const match = parentRelation.url.match(/(\d+)$/);
+      if (!match) {
+        return { id: '', type: '', title: '' };
+      }
+      
+      const parentId = parseInt(match[1], 10);
+      const workItemApi = await this.apiClient.getWorkItemTrackingApi();
+      const parentWorkItem = await workItemApi.getWorkItem(parentId);
+      
+      return {
+        id: parentWorkItem.id?.toString() || '',
+        type: parentWorkItem.fields?.['System.WorkItemType'] || '',
+        title: parentWorkItem.fields?.['System.Title'] || ''
+      };
+    } catch (error) {
+      console.warn('Error getting parent work item info:', error);
+      return { id: '', type: '', title: '' };
+    }
+  }
+  
+  /**
+   * Extract feature flag information from work item fields
+   */
+  private getFeatureFlagInfo(fields: any): string {
+    // Look for common feature flag field names
+    const featureFlagFields = [
+      'Custom.FeatureFlag',
+      'Microsoft.VSTS.Common.FeatureFlag',
+      'FeatureFlag',
+      'Toggle'
+    ];
+    
+    for (const fieldName of featureFlagFields) {
+      if (fields[fieldName]) {
+        return fields[fieldName];
+      }
+    }
+    
+    return '';
+  }
+  
+  /**
+   * Get pull request information from relations
+   */
+  private async getPullRequestInfo(relations: any[]): Promise<{ repos: string[]; authors: string[] }> {
+    const repos = new Set<string>();
+    const authors = new Set<string>();
+    
+    try {
+      const prRelations = relations.filter(rel => 
+        rel.attributes?.name === 'Pull Request' ||
+        rel.url?.includes('pullRequest')
+      );
+      
+      for (const prRelation of prRelations) {
+        if (prRelation.url) {
+          // Extract repo and PR info from URL
+          const prMatch = prRelation.url.match(/\/([^\/]+)\/_git\/([^\/]+)\/pullRequest\/(\d+)/);
+          if (prMatch) {
+            const [, project, repo, prId] = prMatch;
+            repos.add(repo);              // Try to get PR author information
+              try {
+                const gitApi = await this.apiClient.getGitApi();
+                const pr = await gitApi.getPullRequestById(parseInt(prId, 10), project);
+                if (pr.createdBy?.displayName) {
+                  authors.add(pr.createdBy.displayName);
+                }
+              } catch (prError) {
+                console.warn(`Error getting PR ${prId} info:`, prError);
+              }
+          }
+        }
+      }
+    } catch (error) {
+      console.warn('Error getting pull request info:', error);
+    }
+    
+    return {
+      repos: Array.from(repos),
+      authors: Array.from(authors)
+    };
+  }
+  
+  /**
+   * Get risk assessment from custom fields
+   */
+  private getRiskAssessment(fields: any): string {
+    const riskFields = [
+      'Custom.Risk',
+      'Microsoft.VSTS.Common.Risk',
+      'Risk',
+      'RiskAssessment'
+    ];
+    
+    for (const fieldName of riskFields) {
+      if (fields[fieldName]) {
+        return fields[fieldName];
+      }
+    }
+    
+    return '';
   }
 }

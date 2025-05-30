@@ -21,12 +21,14 @@
     "test": "jest"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.7.0",
     "axios": "^1.8.2",
     "azure-devops-node-api": "^14.1.0",
+    "exceljs": "^4.4.0",
+    "node-fetch": "^3.3.2",
     "zod": "^3.24.2"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "@types/jest": "^29.5.14",
     "@types/node": "^20.11.24",
     "@typescript-eslint/eslint-plugin": "^8.25.0",

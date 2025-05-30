@@ -52,16 +52,14 @@ export class ToolRegistry {
 
   /**
    * Initialize all tools
-   */
-  private initializeTools(): void {
-    // Define the core entity tools we know we'll support
+   */  private initializeTools(): void {    // Define the core entity tools we know we'll support
     const coreTools = [
       EntityToolFactory.createProjectsTool(this.apiClient),
       EntityToolFactory.createRepositoriesTool(this.apiClient),
       EntityToolFactory.createWorkItemsTool(this.apiClient),
       EntityToolFactory.createPullRequestsTool(this.apiClient),
       EntityToolFactory.createPipelinesTool(this.apiClient),
-      EntityToolFactory.createWorkItemsQueryTool(this.apiClient),
+      EntityToolFactory.createReleaseNotesTool(this.apiClient),
     ];
     
     // Register all core entity tools

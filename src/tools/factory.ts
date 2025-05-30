@@ -1,9 +1,8 @@
 import { z } from 'zod';
 import { ADOApiClient } from '../api/client/index.js';
 import { handleApiError, normalizePaginationParams, PaginationParams } from '../api/utils/index.js';
-import { WorkItemsQueryTool } from './work-items-query.tool.js';
-import { ReleaseNotesTool } from './release-notes.tool.js';
 import { EntityTool } from './entity-tool.base.js';
+import { ReleaseNotesTool } from './release-notes.tool.js';
 
 /**
  * Operation type for entity tools
@@ -403,17 +402,7 @@ export class EntityToolFactory {
     
     return new WorkItemsTool(apiClient);
   }
-  
-  /**
-   * Create a work items query tool
-   * This specialized tool enables querying work items with advanced filtering
-   * @param apiClient API client
-   * @returns Work items query tool
-   */
-  static createWorkItemsQueryTool = (apiClient: ADOApiClient): EntityTool =>
-    (new WorkItemsQueryTool(apiClient));
-  
-  /**
+    /**
    * Create a pull requests tool
    * @param apiClient API client
    * @returns Pull requests tool
@@ -635,15 +624,14 @@ export class EntityToolFactory {
         }
       }
     }
-    
-    return new PipelinesTool(apiClient);
+      return new PipelinesTool(apiClient);
   }
-  
+
   /**
    * Create a release notes tool
    * @param apiClient API client
    * @returns Release notes tool
-   */
-  static createReleaseNotesTool = (apiClient: ADOApiClient): EntityTool =>
-    (new ReleaseNotesTool(apiClient));
-}
+   */  static createReleaseNotesTool(apiClient: ADOApiClient): EntityTool {
+    return new ReleaseNotesTool(apiClient);
+  }
+  }

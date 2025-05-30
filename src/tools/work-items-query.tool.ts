@@ -9,102 +9,75 @@ import { EntityTool } from './entity-tool.base.js';
 import { ServerResult } from '@modelcontextprotocol/sdk/types.js';
 
 /**
- * Work Items Query Tool for advanced work item filtering
- * Provides a specialized interface for querying work items with various filters
+ * Work Items Query Tool for basic work item filtering
+ * Supports querying by Iteration Path (sprint), Area Path (team), or Assigned To
  */
 export class WorkItemsQueryTool extends EntityTool {
   constructor(apiClient: ADOApiClient) {
-    super(apiClient, 'workItemsQuery', 'Query work items in Azure DevOps with advanced filtering');
+    super(apiClient, 'workItemsQuery', 'Query work items by sprint, team, or assignee');
     
-    // Register operations with enhanced descriptions
     this.registerOperation(
       'query', 
       this.queryWorkItems.bind(this),
       z.object({
-        projectName: z.string(),
-        workItemId: z.number().optional(),
-        workItemType: z.union([z.string(), z.array(z.string())]).optional(),
-        state: z.union([z.string(), z.array(z.string())]).optional(),
-        assignedTo: z.string().optional(),
-        includeDetails: z.boolean().optional()
+        projectName: z.string().describe('Project name (defaults to "Sledgehammer" if not provided)'),
+        assignedTo: z.string().optional().describe('Filter by user assigned to (email or display name)'),
+        areaPath: z.string().optional().describe('Filter by team/area path'),
+        iterationPath: z.string().optional().describe('Filter by sprint/iteration path'),
+        includeDetails: z.boolean().optional().describe('Include detailed work item information')
       }),
-      'Query work items with advanced filtering and pagination support'
+      'Query work items by sprint, team, or assignee'
     );
   }
-
   /**
    * Generate examples for the work items query tool
-   * @returns Array of example strings
    */
   protected generateExamples(): string[] {
     return [
-      '```json\n{\n  "operation": "query",\n  "queryParams": {\n    "projectName": "MyProject",\n    "workItemId": 12345,\n    "includeDetails": true\n  }\n}\n```\nGet detailed information for work item #12345 including custom fields and relationships',
-      '```json\n{\n  "operation": "query",\n  "queryParams": {\n    "projectName": "MyProject",\n    "state": "Active",\n    "workItemType": "Bug",\n    "assignedTo": "john@example.com"\n  }\n}\n```\nFind all active bugs assigned to john@example.com in MyProject'
+      '```json\n{\n  "operation": "query",\n  "queryParams": {\n    "assignedTo": "john@example.com"\n  }\n}\n```\nFind all work items assigned to john@example.com',
+      '```json\n{\n  "operation": "query",\n  "queryParams": {\n    "projectName": "MyProject",\n    "iterationPath": "MyProject\\\\Sprint 1"\n  }\n}\n```\nFind all work items in Sprint 1',
+      '```json\n{\n  "operation": "query",\n  "queryParams": {\n    "areaPath": "MyProject\\\\Team Alpha",\n    "includeDetails": true\n  }\n}\n```\nFind all work items for Team Alpha with detailed information'
     ];
   }
-
   /**
    * Build a WIQL query string from the provided filters
-   * @param projectName Project name
-   * @param filters Filter parameters
-   * @returns WIQL query string
    */
   private buildWiqlQuery(
     projectName: string, 
     filters: {
-      workItemId?: number,
       assignedTo?: string,
-      state?: string | string[],
-      workItemType?: string | string[],
-      includeDetails?: boolean
+      areaPath?: string,
+      iterationPath?: string
     }
   ): string {
-    // Start building the query
-    let query = `SELECT [System.Id], [System.Title], [System.WorkItemType], [System.State], 
-                        [System.CreatedDate], [System.CreatedBy], [System.AssignedTo], 
-                        [System.Parent],
-                        [Custom.ReleaseVersion], [Custom.Toggle], [Custom.FlowsImpacted],
-                        [Custom.UserFunctionsImpacted], [Custom.DatabaseChanges],
-                        [Custom.DataStructures], [Custom.Interfaces], [Custom.RiskAssessment],
-                        [Custom.ConfigChanges], [Custom.AutomatedTests], [Custom.BackoutPlan],
-                        [Custom.Comments]
+    // Basic fields we need
+    let query = `SELECT [System.Id],
+                        [System.Title],
+                        [System.WorkItemType],
+                        [System.State],
+                        [System.AreaPath],
+                        [System.IterationPath],
+                        [System.AssignedTo],
+                        [System.CreatedDate],
+                        [System.CreatedBy]
                  FROM WorkItems
                  WHERE [System.TeamProject] = '${projectName.replace(/'/g, "''")}'`;
 
     const conditions: string[] = [];
-
-    // Add filter for specific work item ID
-    if (filters.workItemId) {
-      conditions.push(`[System.Id] = ${filters.workItemId}`);
-    }
 
     // Add filter for assigned to
     if (filters.assignedTo) {
       conditions.push(`[System.AssignedTo] CONTAINS '${filters.assignedTo.replace(/'/g, "''")}'`);
     }
 
-    // Add filters for state
-    if (filters.state) {
-      if (Array.isArray(filters.state)) {
-        if (filters.state.length > 0) {
-          const stateConditions = filters.state.map(s => `[System.State] = '${s.replace(/'/g, "''")}'`);
-          conditions.push(`(${stateConditions.join(' OR ')})`);
-        }
-      } else {
-        conditions.push(`[System.State] = '${filters.state.replace(/'/g, "''")}'`);
-      }
+    // Add filter for area path
+    if (filters.areaPath) {
+      conditions.push(`[System.AreaPath] UNDER '${filters.areaPath.replace(/'/g, "''")}'`);
     }
 
-    // Add filters for work item type
-    if (filters.workItemType) {
-      if (Array.isArray(filters.workItemType)) {
-        if (filters.workItemType.length > 0) {
-          const typeConditions = filters.workItemType.map(t => `[System.WorkItemType] = '${t.replace(/'/g, "''")}'`);
-          conditions.push(`(${typeConditions.join(' OR ')})`);
-        }
-      } else {
-        conditions.push(`[System.WorkItemType] = '${filters.workItemType.replace(/'/g, "''")}'`);
-      }
+    // Add filter for iteration path
+    if (filters.iterationPath) {
+      conditions.push(`[System.IterationPath] UNDER '${filters.iterationPath.replace(/'/g, "''")}'`);
     }
 
     // Add conditions to query
@@ -114,36 +87,33 @@ export class WorkItemsQueryTool extends EntityTool {
 
     return query;
   }
-
   /**
-   * Query work items with advanced filtering
-   * @param params Query parameters
-   * @returns Work items matching the query
+   * Query work items by sprint, team, or assignee
    */
   async queryWorkItems(params: {
-    projectName: string,
-    workItemId?: number,
-    workItemType?: string | string[],
-    state?: string | string[],
+    projectName?: string,
     assignedTo?: string,
+    areaPath?: string,
+    iterationPath?: string,
     includeDetails?: boolean
   }): Promise<ServerResult> {
     try {
+      // Default to Sledgehammer project if not specified
+      const projectName = params.projectName || 'Sledgehammer';
+      
       const workItemTrackingApi = await this.apiClient.getWorkItemTrackingApi();
 
       // Build the WIQL query
       const wiql = {
-        query: this.buildWiqlQuery(params.projectName, {
-          workItemId: params.workItemId,
+        query: this.buildWiqlQuery(projectName, {
           assignedTo: params.assignedTo,
-          state: params.state,
-          workItemType: params.workItemType,
-          includeDetails: params.includeDetails
+          areaPath: params.areaPath,
+          iterationPath: params.iterationPath
         })
       };
 
       // Execute the query
-      const queryResult = await workItemTrackingApi.queryByWiql(wiql, { project: params.projectName });
+      const queryResult = await workItemTrackingApi.queryByWiql(wiql, { project: projectName });
       
       if (!queryResult.workItems?.length) {
         return {
@@ -151,95 +121,45 @@ export class WorkItemsQueryTool extends EntityTool {
           result: {
             count: 0,
             workItems: [],
-            hasMore: false
+            query: wiql.query
           }
         };
       }
 
-      // Get full work item details
-      const workItemIds = queryResult.workItems.map(wi => wi.id);
+      // Get basic work item details
+      const workItemIds = queryResult.workItems.map(wi => wi.id).filter((id): id is number => id !== undefined);
       const fields = [
         'System.Id', 'System.Title', 'System.WorkItemType', 'System.State',
-        'System.CreatedDate', 'System.CreatedBy', 'System.AssignedTo',
-        'System.Parent',
-        'Custom.ReleaseVersion', 'Custom.Toggle', 'Custom.FlowsImpacted',
-        'Custom.UserFunctionsImpacted', 'Custom.DatabaseChanges',
-        'Custom.DataStructures', 'Custom.Interfaces', 'Custom.RiskAssessment',
-        'Custom.ConfigChanges', 'Custom.AutomatedTests', 'Custom.BackoutPlan',
-        'Custom.Comments'
+        'System.AreaPath', 'System.IterationPath', 'System.AssignedTo', 
+        'System.CreatedDate', 'System.CreatedBy'
       ];
+      
       const expand = params.includeDetails ? WorkItemExpand.Relations : undefined;
-      const workItems = await workItemTrackingApi.getWorkItems(
-        workItemIds.filter((id): id is number => id !== undefined),
-        fields,
-        undefined,
-        expand
-      );
+      const workItems = await workItemTrackingApi.getWorkItems(workItemIds, fields, undefined, expand);
 
       // Process the work items
-      const processedItems: DetailedWorkItemResult[] = await Promise.all(
-        workItems.map(async (wi): Promise<DetailedWorkItemResult> => {
-          const fields = wi.fields as WorkItemFields || {};
-          
-          // Get parent details if available
-          let parent;
-          if (fields['System.Parent']) {
-            const parentItem = await workItemTrackingApi.getWorkItem(
-              fields['System.Parent'],
-              ['System.Id', 'System.Title', 'System.WorkItemType']
-            );
-            if (parentItem?.fields) {
-              parent = {
-                id: fields['System.Parent'],
-                type: String(parentItem.fields['System.WorkItemType'] || ''),
-                title: String(parentItem.fields['System.Title'] || '')
-              };
-            }
-          }
-
-          // Get related PRs
-          const relatedPRs = wi.relations
-            ?.filter(r => r.rel === 'ArtifactLink' && r.attributes?.name === 'GitHub Pull Request')
-            .map(r => r.url?.split('/').pop() || '')
-            .filter(Boolean) || [];
-
-          // Get authors (created by and assigned to)
-          const authors = new Set<string>();
-          if (fields['System.CreatedBy']?.displayName) {
-            authors.add(fields['System.CreatedBy'].displayName);
-          }
-          if (fields['System.AssignedTo']?.displayName) {
-            authors.add(fields['System.AssignedTo'].displayName);
-          }
-
-          return {
-            id: fields['System.Id'] || 0,
-            title: fields['System.Title'] || '',
-            releaseVersion: fields['Custom.ReleaseVersion'],
-            parent,
-            toggle: fields['Custom.Toggle'],
-            relatedPRs,
-            authors: Array.from(authors),
-            flowsImpacted: fields['Custom.FlowsImpacted'],
-            userFunctions: fields['Custom.UserFunctionsImpacted'],
-            dbChanges: fields['Custom.DatabaseChanges'],
-            dataStructures: fields['Custom.DataStructures'],
-            interfaces: fields['Custom.Interfaces'],
-            riskAssessment: fields['Custom.RiskAssessment'],
-            configChanges: fields['Custom.ConfigChanges'],
-            automatedTests: fields['Custom.AutomatedTests'],
-            backoutPlan: fields['Custom.BackoutPlan'],
-            comments: fields['Custom.Comments']
-          };
-        })
-      );
+      const processedItems: WorkItemResult[] = workItems.map((wi): WorkItemResult => {
+        const fields = wi.fields || {};
+        
+        return {
+          id: fields['System.Id'] || 0,
+          title: fields['System.Title'] || '',
+          workItemType: fields['System.WorkItemType'] || '',
+          state: fields['System.State'] || '',
+          areaPath: fields['System.AreaPath'] || '',
+          iterationPath: fields['System.IterationPath'] || '',
+          assignedTo: fields['System.AssignedTo']?.displayName || undefined,
+          createdDate: fields['System.CreatedDate'] || '',
+          createdBy: fields['System.CreatedBy']?.displayName || ''
+        };
+      });
 
       return {
         tools: [],
         result: {
           count: processedItems.length,
           workItems: processedItems,
-          hasMore: false
+          query: wiql.query
         }
       };
 
@@ -249,55 +169,15 @@ export class WorkItemsQueryTool extends EntityTool {
   }
 }
 
-// Custom field interfaces
-interface WorkItemCustomFields {
-  'Custom.ReleaseVersion': string;
-  'Custom.Toggle': string;
-  'Custom.FlowsImpacted': string;
-  'Custom.UserFunctionsImpacted': string;
-  'Custom.DatabaseChanges': string;
-  'Custom.DataStructures': string;
-  'Custom.Interfaces': string;
-  'Custom.RiskAssessment': string;
-  'Custom.ConfigChanges': string;
-  'Custom.AutomatedTests': string;
-  'Custom.BackoutPlan': string;
-  'Custom.Comments': string;
-}
-
-interface WorkItemSystemFields {
-  'System.Id': number;
-  'System.Title': string;
-  'System.WorkItemType': string;
-  'System.State': string;
-  'System.CreatedDate': string;
-  'System.CreatedBy': { displayName: string; uniqueName: string; };
-  'System.AssignedTo': { displayName: string; uniqueName: string; };
-  'System.Parent'?: number;
-}
-
-interface WorkItemFields extends Partial<WorkItemSystemFields>, Partial<WorkItemCustomFields> {}
-
-interface DetailedWorkItemResult {
+// Simple interface for work item results
+interface WorkItemResult {
   id: number;
   title: string;
-  releaseVersion?: string;
-  parent?: {
-    id: number;
-    type: string;
-    title: string;
-  };
-  toggle?: string;
-  relatedPRs: string[];
-  authors: string[];
-  flowsImpacted?: string;
-  userFunctions?: string;
-  dbChanges?: string;
-  dataStructures?: string;
-  interfaces?: string;
-  riskAssessment?: string;
-  configChanges?: string;
-  automatedTests?: string;
-  backoutPlan?: string;
-  comments?: string;
+  workItemType: string;
+  state: string;
+  areaPath: string;
+  iterationPath: string;
+  assignedTo?: string;
+  createdDate: string;
+  createdBy: string;
 }
