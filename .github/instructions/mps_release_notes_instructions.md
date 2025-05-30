@@ -88,7 +88,7 @@ The tool will:
 
 ### 2. JSON Escaping
 - ❌ Don't use single backslashes: `"Sledgehammer\Phase 12"`
-- ✅ Use double backslashes in JSON: `"Sledgehammer\\\\Phase 12"`
+- ✅ Use double backslashes in JSON: `"Sledgehammer\\Phase 12"`
 
 ### 3. Parameter Structure
 - ❌ Don't pass parameters directly to the tool

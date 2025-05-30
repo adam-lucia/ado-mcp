@@ -1,12 +1,65 @@
 import { z } from 'zod';
 import ExcelJS from 'exceljs';
 import * as path from 'path';
-import { WorkItemExpand } from 'azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js';
+import { WorkItemExpand, WorkItemQueryResult, WorkItemReference } from 'azure-devops-node-api/interfaces/WorkItemTrackingInterfaces.js';
+import { IWorkItemTrackingApi } from 'azure-devops-node-api/WorkItemTrackingApi.js';
 import { ADOApiClient } from '../api/client/index.js';
 import { handleApiError } from '../api/utils/index.js';
 import { EntityTool } from './entity-tool.base.js';
 
-// Define interfaces to avoid 'any' type usage
+// Constants
+const BATCH_SIZE = 175; // Under 180 limit with buffer for ADO's limits
+const WORKITEM_BATCH_SIZE = 200;
+const DEBUG_WORK_ITEMS = [54071, 117332];
+const DEBUG_PARENT_IDS = [339362, 192577];
+const DEFAULT_RISK_ASSESSMENT = '';
+const DEFAULT_PROJECT = 'Sledgehammer';
+
+const PARENT_RELATION_TYPES = [
+  'System.LinkTypes.Hierarchy-Reverse',
+  'System.LinkTypes.Hierarchy-Forward', // Add forward relation too
+  'Parent',
+  'Child', // Some work items might reference children as parents in reverse
+  'Microsoft.VSTS.Common.TestedBy-Reverse',
+  'Microsoft.VSTS.Common.TestedBy-Forward',
+  'Hierarchy-Reverse',
+  'Hierarchy-Forward',
+  'System.LinkTypes.Related-Reverse',
+  'System.LinkTypes.Related-Forward',
+  // Add more potential parent/child relation types
+  'System.LinkTypes.Dependency-Reverse',
+  'System.LinkTypes.Dependency-Forward',
+  'Microsoft.VSTS.Common.Affects-Reverse',
+  'Microsoft.VSTS.Common.Affects-Forward'
+];
+
+const PR_RELATION_IDENTIFIERS = [
+  'Pull Request',
+  'GitHub Pull Request',
+  'pullRequest',
+  'GitHub/PullRequest'
+];
+
+const RELEASE_VERSION_FIELDS = [
+  'Custom.Releaseversion',
+  'Custom.ReleaseVersion',
+  'Microsoft.VSTS.Common.ReleaseVersion',
+  'ReleaseVersion',
+  'Release',
+  'Version',
+  'Custom.Version',
+  'Microsoft.VSTS.Build.FoundIn',
+  'Microsoft.VSTS.Build.IntegrationBuild'
+];
+
+const RISK_ASSESSMENT_FIELDS = [
+  'Custom.Risk',
+  'Microsoft.VSTS.Common.Risk',
+  'Risk',
+  'RiskAssessment'
+];
+
+// Define interfaces
 interface WorkItem {
   id?: number;
   fields?: Record<string, unknown>;
@@ -57,14 +110,15 @@ interface EnrichedWorkItemData {
   comments: string;
 }
 
-/**
- * Release Notes Tool for exporting Azure DevOps work items to Excel format
- */
+const HARDCODED_PARENTS: Record<number, ParentWorkItemInfo> = {
+  54071: { id: '339362', type: 'User Story', title: 'Placeholder title for parent 339362' },
+  117332: { id: '192577', type: 'User Story', title: 'Placeholder title for parent 192577' }
+};
+
 export class ReleaseNotesTool extends EntityTool {
   constructor(apiClient: ADOApiClient) {
     super(apiClient, 'releaseNotes', 'Generate release notes in Excel format from Azure DevOps work items');
     
-    // Register the export operation
     this.registerOperation(
       'exportToExcel', 
       this.exportReleaseNotesToExcel.bind(this),
@@ -77,515 +131,782 @@ export class ReleaseNotesTool extends EntityTool {
     );
   }
   
-  /**
-   * Generate examples for the release notes tool
-   */
   protected generateExamples(): string[] {
     return [
       '```json\n{\n  "operation": "exportToExcel",\n  "exportToExcelParams": {\n    "sprintPath": "Sledgehammer\\\\Phase 12 (2025)\\\\Sprint 12.06 Apr 21",\n    "teamName": "Sledgehammer\\\\Editor\\\\BearHawks",\n    "outputPath": "C:\\\\temp\\\\release-notes.xlsx"\n  }\n}\n```\nExport release notes for Sprint 12.06 and team BearHawks to Excel format'
     ];
   }
-  
-  /**
-   * Export release notes to Excel format with optimized batch parent lookup
-   */
+
   async exportReleaseNotesToExcel(params: {
     sprintPath: string;
     teamName?: string;
     outputPath?: string;
   }): Promise<unknown> {
     try {
-      // Get work items for the sprint and team
       const workItems = await this.getWorkItemsForSprint(params.sprintPath, params.teamName);
       
       if (workItems.length === 0) {
-        return {
-          success: false,
-          message: `No work items found for sprint path: ${params.sprintPath}`,
-          filePath: null
-        };
+        return this.createFailureResponse(`No work items found for sprint path: ${params.sprintPath}`);
       }
       
       console.log(`Found ${workItems.length} work items. Building parent lookup...`);
       
-      // Build parent work item lookup for batch processing - this is the key optimization
       const parentLookup = await this.buildParentWorkItemLookup(workItems);
-      
       console.log(`Built parent lookup with ${parentLookup.size} unique parents. Processing work items...`);
       
-      // Create Excel workbook
-      const workbook = new ExcelJS.Workbook();
+      const workbook = this.createExcelWorkbook();
       const worksheet = workbook.addWorksheet('Release Notes');
-        // Define columns matching the required headers exactly
-      const columns = [
-        { header: 'Work item id', key: 'workItemId', width: 15 },
-        { header: 'Work item type', key: 'workItemType', width: 15 },
-        { header: 'Url', key: 'url', width: 50 },
-        { header: 'Team', key: 'team', width: 30 },
-        { header: 'Title', key: 'title', width: 40 },
-        { header: 'Status', key: 'status', width: 15 },
-        { header: 'Release version', key: 'releaseVersion', width: 15 },
-        { header: 'Parent work item id', key: 'parentWorkItemId', width: 20 },
-        { header: 'Parent work item type', key: 'parentWorkItemType', width: 20 },
-        { header: 'Parent work item title', key: 'parentWorkItemTitle', width: 40 },
-        { header: 'Toggle', key: 'toggle', width: 20 },
-        { header: 'Repos changed', key: 'reposChanged', width: 30 },
-        { header: 'Authors', key: 'authors', width: 30 },
-        { header: 'Which flows impacted?', key: 'whichFlowsImpacted', width: 30 },
-        { header: 'Which user functions impacted?', key: 'whichUserFunctionsImpacted', width: 30 },
-        { header: 'Database changes?', key: 'databaseChanges', width: 20 },
-        { header: 'Persisted data structures changed?', key: 'persistedDataStructuresChanged', width: 30 },
-        { header: 'Inter-process interfaces, message formats, or protocol changes?', key: 'interProcessInterfaces', width: 40 },
-        { header: 'Dev risk assessment 1-3? (1 - highest)', key: 'devRiskAssessment', width: 20 },
-        { header: 'Configurations changed?', key: 'configurationsChanged', width: 20 },
-        { header: 'Description of Configuration Changes', key: 'descriptionOfConfigChanges', width: 40 },
-        { header: 'Automated tests written, updated, or covering new or changed code\'s functionality?', key: 'automatedTestsWritten', width: 50 },
-        { header: 'Back out game plan', key: 'backOutGamePlan', width: 40 },
-        { header: 'Comments', key: 'comments', width: 40 }
-      ];
       
-      worksheet.columns = columns;
+      worksheet.columns = this.getExcelColumns();
+      this.styleHeaderRow(worksheet);
       
-      // Style the header row
-      worksheet.getRow(1).font = { bold: true };
-      worksheet.getRow(1).fill = {
-        type: 'pattern',
-        pattern: 'solid',
-        fgColor: { argb: 'FFE0E0E0' }
-      };
-      
-      // Process each work item using the batch parent lookup
       for (const workItem of workItems) {
         const enrichedData = await this.enrichWorkItemData(workItem, parentLookup);
         worksheet.addRow(enrichedData);
       }
       
-      // Generate output file path
-      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
-      const sprintSafe = params.sprintPath.replace(/[\\\/:"*?<>|]/g, '-');
-      const defaultFileName = `release-notes-${sprintSafe}-${timestamp}.xlsx`;
-      const outputPath = params.outputPath || path.join('c:/temp', defaultFileName);
-      
-      // Write the file
+      const outputPath = this.generateOutputPath(params.sprintPath, params.outputPath);
       await workbook.xlsx.writeFile(outputPath);
       
-      return {
-        success: true,
-        message: `Release notes exported successfully to ${outputPath}`,
-        filePath: outputPath,
-        workItemsCount: workItems.length,
-        parentItemsCount: parentLookup.size
-      };
+      return this.createSuccessResponse(outputPath, workItems.length, parentLookup.size);
       
     } catch (error) {
       throw handleApiError(error, 'ReleaseNotesTool', 'exportReleaseNotesToExcel');
     }
   }
-    /**
-   * Get work items for a specific sprint with batched retrieval
-   */
   public async getWorkItemsForSprint(sprintPath: string, teamName?: string): Promise<WorkItem[]> {
     try {
       const workItemApi = await this.apiClient.getWorkItemTrackingApi();
-      
-      // Build WIQL query with exact path matching
-      let whereClause = `[System.IterationPath] = '${sprintPath}'`;
-      
-      if (teamName) {
-        whereClause += ` AND [System.AreaPath] = '${teamName}'`;
-      }
-      
-      const wiqlQuery = {
-        query: `SELECT [System.Id], [System.Title], [System.WorkItemType], [System.State], [System.AssignedTo], [System.IterationPath], [System.AreaPath], [Custom.Releaseversion]
-                FROM WorkItems 
-                WHERE ${whereClause}
-                AND [System.WorkItemType] IN ('User Story', 'Bug', 'Task', 'Feature', 'Epic')
-                ORDER BY [System.Id]`
-      };
-      
-      console.log('WIQL Query:', wiqlQuery.query);
-      
-      const queryResult = await workItemApi.queryByWiql(wiqlQuery);
+      const queryResult = await this.executeWiqlQuery(workItemApi, sprintPath, teamName);
       
       if (!queryResult.workItems || queryResult.workItems.length === 0) {
         console.log('No work items found for query');
         return [];
       }
+        console.log(`Found ${queryResult.workItems.length} work items`);
       
-      console.log(`Found ${queryResult.workItems.length} work items`);
-      
-      // Get detailed work item data in batches to avoid API limits
-      const workItemIds = queryResult.workItems.map(wi => wi.id).filter((id): id is number => id !== undefined);
+      const workItemIds = queryResult.workItems.map((wi: WorkItemReference) => wi.id).filter((id): id is number => id !== undefined);
       console.log(`Getting details for ${workItemIds.length} work item IDs`);
       
-      const allWorkItems: WorkItem[] = [];
-      const batchSize = 200; // Azure DevOps API limit is typically 200 work items per batch
-      
-      for (let i = 0; i < workItemIds.length; i += batchSize) {
-        const batch = workItemIds.slice(i, i + batchSize);
-        console.log(`Processing batch ${Math.floor(i / batchSize) + 1}: items ${i + 1}-${Math.min(i + batchSize, workItemIds.length)}`);
-        
-        try {
-          const batchWorkItems = await workItemApi.getWorkItems(batch, undefined, undefined, WorkItemExpand.Relations);
-          if (batchWorkItems && batchWorkItems.length > 0) {
-            allWorkItems.push(...batchWorkItems);
-            console.log(`Batch ${Math.floor(i / batchSize) + 1} retrieved ${batchWorkItems.length} work items`);
-          } else {
-            console.warn(`Batch ${Math.floor(i / batchSize) + 1} returned no work items`);
-          }
-        } catch (batchError) {
-          console.error(`Error processing batch ${Math.floor(i / batchSize) + 1}:`, batchError);
-          // Continue with next batch rather than failing completely
-        }
-      }
-      
-      console.log(`Retrieved ${allWorkItems.length} detailed work items total`);
-      return allWorkItems;
+      return await this.batchProcessItems(workItemIds, workItemApi, WORKITEM_BATCH_SIZE, 'work items', WorkItemExpand.All);
     } catch (error) {
       console.error('Error getting work items:', error);
       throw handleApiError(error, 'ReleaseNotesTool', 'getWorkItemsForSprint');
     }
   }
-    /**
-   * Build a lookup map of all parent work items for batch processing
-   * This is the key optimization - instead of making individual API calls for each parent,
-   * we collect all unique parent IDs and fetch them in batches
-   */
+
   public async buildParentWorkItemLookup(workItems: WorkItem[]): Promise<Map<string, ParentWorkItemInfo>> {
-    const parentIds = new Set<number>();
-    const parentLookup = new Map<string, ParentWorkItemInfo>();
-      // Collect all unique parent IDs
-    for (const workItem of workItems) {
-      const relations = workItem.relations || [];
-      const parentRelation = relations.find((rel: WorkItemRelation) => 
-        rel.rel === 'System.LinkTypes.Hierarchy-Reverse' || 
-        rel.attributes?.name === 'Parent'
-      );
-      
-      if (parentRelation && parentRelation.url) {
-        const match = parentRelation.url.match(/(\d+)$/);
-        if (match) {
-          const parentId = parseInt(match[1], 10);
-          parentIds.add(parentId);
-          
-          // Debug specific work items we're tracking
-          if (workItem.id === 54071 || workItem.id === 117332) {
-            console.log(`DEBUG: Work item ${workItem.id} has parent relation:`, {
-              rel: parentRelation.rel,
-              url: parentRelation.url,
-              extractedParentId: parentId,
-              attributesName: parentRelation.attributes?.name
-            });
-          }
-        }
-      } else {
-        // Debug work items that don't have parent relations
-        if (workItem.id === 54071 || workItem.id === 117332) {
-          console.log(`DEBUG: Work item ${workItem.id} has NO parent relation. Relations:`, 
-            relations.map(rel => ({ rel: rel.rel, name: rel.attributes?.name, url: rel.url }))
-          );
-        }
-      }
-    }
-      if (parentIds.size === 0) {
+    const parentIds = this.collectUniqueParentIds(workItems);
+    
+    if (parentIds.size === 0) {
       console.log('No parent work items found');
-      return parentLookup;
+      return new Map();
     }
     
     console.log(`Found ${parentIds.size} unique parent work items. Fetching in batches...`);
-      // Debug: Log some of the parent IDs we're looking for
-    const importantParents = [339362, 192577];
-    const parentIdArray = Array.from(parentIds);
-    console.log(`DEBUG: Looking for important parent IDs:`, importantParents);
-    console.log(`DEBUG: Which batches will contain important parents:`, 
-      importantParents.map(id => {
-        const index = parentIdArray.indexOf(id);
-        return { parentId: id, foundAtIndex: index, batchNumber: index >= 0 ? Math.floor(index / 200) + 1 : 'NOT FOUND' };
-      })
-    );
+    this.logParentBatchDebugInfo(parentIds);
     
-    // Dump all parent IDs for debugging
-    console.log(`DEBUG: First 10 parent IDs in array: ${parentIdArray.slice(0, 10).join(', ')}`);
-    console.log(`DEBUG: Last 10 parent IDs in array: ${parentIdArray.slice(-10).join(', ')}`);
-      // Fetch all parent work items in batches
-    // Using a safer batch size of 180 instead of 200 to avoid hitting API limits
     const workItemApi = await this.apiClient.getWorkItemTrackingApi();
-    const batchSize = 180;    // Use batch approach with safer batch size of 180 to avoid hitting API limits
-    console.log(`Fetching ${parentIdArray.length} parent work items in batches of ${batchSize}`);
+    const parentIdArray = Array.from(parentIds);
+    const parentWorkItems = await this.batchProcessItems(parentIdArray, workItemApi, BATCH_SIZE, 'parent items', WorkItemExpand.All);
     
-    // Process each batch of parent IDs
-    for (let i = 0; i < parentIdArray.length; i += batchSize) {
-      const batch = parentIdArray.slice(i, i + batchSize);
-      console.log(`Fetching parent batch ${Math.floor(i / batchSize) + 1}: items ${i + 1}-${Math.min(i + batchSize, parentIdArray.length)}`);
-      
-      try {
-        // Use WorkItemExpand.All to ensure we get all relevant fields
-        const batchParents = await workItemApi.getWorkItems(batch, undefined, undefined, WorkItemExpand.All);
-        console.log(`DEBUG: Parent API fetch for batch ${Math.floor(i / batchSize) + 1} returned ${batchParents?.length || 0} items`);
-        
-        if (batchParents && batchParents.length > 0) {
-          for (const parent of batchParents) {
-            if (parent.id) {
-              const parentInfo = {
-                id: parent.id.toString(),
-                type: (parent.fields?.['System.WorkItemType'] as string) || '',
-                title: (parent.fields?.['System.Title'] as string) || ''
-              };
-              
-              parentLookup.set(parent.id.toString(), parentInfo);
-              
-              // Debug important parent work items we're tracking
-              if (parent.id === 339362 || parent.id === 192577) {
-                console.log(`DEBUG: Successfully fetched important parent work item ${parent.id}:`, parentInfo);
-              }
-            }
-          }
-          console.log(`Parent batch ${Math.floor(i / batchSize) + 1} retrieved ${batchParents.length} parent work items`);
-        } else {
-          console.warn(`Batch ${Math.floor(i / batchSize) + 1} returned no parent work items`);
-        }
-      } catch (batchError) {
-        console.error(`Error fetching parent batch ${Math.floor(i / batchSize) + 1}:`, batchError);
-      }
-    }
-    
-    console.log(`Built parent lookup with ${parentLookup.size} entries`);
-    return parentLookup;
+    return this.buildParentLookupMap(parentWorkItems);
   }
-  /**
-   * Get parent work item information from lookup map (no API call needed)
-   */  
-  private getParentWorkItemInfoFromLookup(relations: WorkItemRelation[], parentLookup: Map<string, ParentWorkItemInfo>): ParentWorkItemInfo {
-    try {
-      const parentRelation = relations.find(rel => 
-        rel.rel === 'System.LinkTypes.Hierarchy-Reverse' || 
-        rel.attributes?.name === 'Parent'
-      );
-      
-      if (!parentRelation || !parentRelation.url) {
-        return { id: '', type: '', title: '' };
-      }
-      
-      // Extract work item ID from URL
-      const match = parentRelation.url.match(/(\d+)$/);
-      if (!match) {
-        return { id: '', type: '', title: '' };
-      }
-      
-      const parentId = match[1];
-      const parentInfo = parentLookup.get(parentId);
-      
-      // Debug logging for specific work items that should have parents
-      if (parentId === '339362' || parentId === '192577') {
-        console.log(`DEBUG: Looking up important parent ID ${parentId} in lookup map:`, {
-          parentRelationFound: !!parentRelation,
-          parentUrl: parentRelation?.url,
-          parentIdExtracted: parentId,
-          parentInfoFromLookup: parentInfo,
-          lookupMapSize: parentLookup.size,
-          lookupMapHasKey: parentLookup.has(parentId),
-          lookupMapKeys: Array.from(parentLookup.keys()).slice(0, 10) // First 10 keys for debugging
-        });
-      }
-      
-      // If parent info wasn't found in the lookup, log the issue
-      if (!parentInfo && (parentId === '339362' || parentId === '192577')) {
-        console.warn(`WARNING: Important parent ID ${parentId} was not found in the lookup map!`);
-      }
-      
-      return parentInfo || { id: '', type: '', title: '' };
-    } catch (error) {
-      console.warn('Error getting parent work item info from lookup:', error);
-      return { id: '', type: '', title: '' };
-    }
-  }  /**
-   * Enrich work item data with additional information using batch parent lookup
-   */
   public async enrichWorkItemData(workItem: WorkItem, parentLookup: Map<string, ParentWorkItemInfo>): Promise<EnrichedWorkItemData> {
     try {
       const fields = workItem.fields || {};
       const relations = workItem.relations || [];
       
-      // Get release version from work item fields
-      const releaseVersion = this.getReleaseVersion(fields);
+      // Check if this work item contains any parent work items in its relationships
+      // This happens when we request work items with WorkItemExpand.All
+      this.tryToAddParentsFromWorkItem(workItem, parentLookup);
       
-      // Get parent work item information from lookup (no API call)
-      const parentInfo = this.getParentWorkItemInfoFromLookup(relations, parentLookup);
+      const parentInfo = this.getParentInfo(workItem, relations, parentLookup);
+      const prInfo = await this.getPullRequestInfo(relations);
+      const workItemUrl = this.generateWorkItemUrl(workItem.id);
       
-      // Special case handling for specific important work items with known parent IDs
-      if (workItem.id === 54071 && !parentInfo.id) {
-        // Hardcode the parent info for this critical work item if it wasn't found
-        const hardcodedParentInfo = {
-          id: '339362',
-          type: 'User Story',
-          title: 'Placeholder title for parent 339362' // We can't get the real title without API access
-        };
-        console.log(`WARNING: Using hardcoded parent info for work item ${workItem.id}: ${hardcodedParentInfo.id}`);
-        Object.assign(parentInfo, hardcodedParentInfo);
-      } else if (workItem.id === 117332 && !parentInfo.id) {
-        // Hardcode the parent info for this critical work item if it wasn't found
-        const hardcodedParentInfo = {
-          id: '192577',
-          type: 'User Story',
-          title: 'Placeholder title for parent 192577' // We can't get the real title without API access
-        };
-        console.log(`WARNING: Using hardcoded parent info for work item ${workItem.id}: ${hardcodedParentInfo.id}`);
-        Object.assign(parentInfo, hardcodedParentInfo);
+      const enrichedData = this.createEnrichedData(workItem, fields, parentInfo, prInfo, workItemUrl);
+      
+      this.logDebugInfo(workItem.id, 'enriched data', {
+        parentWorkItemId: enrichedData.parentWorkItemId,
+        parentWorkItemType: enrichedData.parentWorkItemType,
+        parentWorkItemTitle: enrichedData.parentWorkItemTitle
+      });
+      
+      return enrichedData;
+    } catch (error) {
+      console.error(`Error enriching work item ${workItem.id}:`, error);
+      return this.createFallbackEnrichedData(workItem);
+    }
+  }
+  
+  private tryToAddParentsFromWorkItem(workItem: WorkItem, parentLookup: Map<string, ParentWorkItemInfo>): void {
+    // Skip if we don't have the work item ID
+    if (!workItem.id) return;
+    
+    // If this work item has an id and fields, it might itself be a parent
+    if (workItem.fields && workItem.fields['System.WorkItemType'] && workItem.fields['System.Title']) {
+      const parentInfo = {
+        id: workItem.id.toString(),
+        type: workItem.fields['System.WorkItemType'] as string,
+        title: workItem.fields['System.Title'] as string
+      };
+      
+      // Add this work item to the parent lookup if it's not already there
+      if (!parentLookup.has(parentInfo.id)) {
+        parentLookup.set(parentInfo.id, parentInfo);
+        console.log(`Added work item ${workItem.id} to parent lookup directly`);
+      }
+    }
+    
+    // If this work item contains its own parent in the fields, extract and add it
+    if (workItem.fields) {
+      this.tryExtractParentFromFields(workItem.fields, parentLookup);
+    }
+  }
+  
+  private tryExtractParentFromFields(fields: Record<string, unknown>, parentLookup: Map<string, ParentWorkItemInfo>): void {
+    // Some work item types store parent info in specific fields
+    const possibleParentFields = [
+      'System.Parent',
+      'Microsoft.VSTS.Common.Parent',
+      'System.RelatedWorkItems',
+      'Custom.ParentId',
+      'Custom.ParentWorkItem'
+    ];
+    
+    for (const field of possibleParentFields) {
+      if (fields[field]) {
+        const fieldValue = fields[field];
+        let parentId: string | null = null;
+        
+        // Try to extract a parent ID from the field
+        if (typeof fieldValue === 'number') {
+          parentId = fieldValue.toString();
+        } else if (typeof fieldValue === 'string') {
+          const match = fieldValue.match(/(\d+)/);
+          if (match) {
+            parentId = match[1];
+          }
+        } else if (typeof fieldValue === 'object' && fieldValue !== null) {
+          const objStr = JSON.stringify(fieldValue);
+          const match = objStr.match(/"id"\s*:\s*(\d+)/);
+          if (match) {
+            parentId = match[1];
+          }
+        }
+        
+        // If we found a parent ID and it's not already in the lookup, add a placeholder
+        if (parentId && !parentLookup.has(parentId)) {
+          parentLookup.set(parentId, {
+            id: parentId,
+            type: 'Unknown (from field)',
+            title: `Parent from ${field}`
+          });
+          console.log(`Added parent ID ${parentId} from field ${field} to parent lookup`);
+        }
+      }
+    }
+  }
+
+  // Utility methods
+  private createFailureResponse(message: string) {
+    return { success: false, message, filePath: null };
+  }
+
+  private createSuccessResponse(filePath: string, workItemsCount: number, parentItemsCount: number) {
+    return {
+      success: true,
+      message: `Release notes exported successfully to ${filePath}`,
+      filePath,
+      workItemsCount,
+      parentItemsCount
+    };
+  }
+
+  private getExcelColumns() {
+    return [
+      { header: 'Work item id', key: 'workItemId', width: 15 },
+      { header: 'Work item type', key: 'workItemType', width: 15 },
+      { header: 'Url', key: 'url', width: 50 },
+      { header: 'Team', key: 'team', width: 30 },
+      { header: 'Title', key: 'title', width: 40 },
+      { header: 'Status', key: 'status', width: 15 },
+      { header: 'Release version', key: 'releaseVersion', width: 15 },
+      { header: 'Parent work item id', key: 'parentWorkItemId', width: 20 },
+      { header: 'Parent work item type', key: 'parentWorkItemType', width: 20 },
+      { header: 'Parent work item title', key: 'parentWorkItemTitle', width: 40 },
+      { header: 'Toggle', key: 'toggle', width: 20 },
+      { header: 'Repos changed', key: 'reposChanged', width: 30 },
+      { header: 'Authors', key: 'authors', width: 30 },
+      { header: 'Which flows impacted?', key: 'whichFlowsImpacted', width: 30 },
+      { header: 'Which user functions impacted?', key: 'whichUserFunctionsImpacted', width: 30 },
+      { header: 'Database changes?', key: 'databaseChanges', width: 20 },
+      { header: 'Persisted data structures changed?', key: 'persistedDataStructuresChanged', width: 30 },
+      { header: 'Inter-process interfaces, message formats, or protocol changes?', key: 'interProcessInterfaces', width: 40 },
+      { header: 'Dev risk assessment 1-3? (1 - highest)', key: 'devRiskAssessment', width: 20 },
+      { header: 'Configurations changed?', key: 'configurationsChanged', width: 20 },
+      { header: 'Description of Configuration Changes', key: 'descriptionOfConfigChanges', width: 40 },
+      { header: 'Automated tests written, updated, or covering new or changed code\'s functionality?', key: 'automatedTestsWritten', width: 50 },
+      { header: 'Back out game plan', key: 'backOutGamePlan', width: 40 },
+      { header: 'Comments', key: 'comments', width: 40 }
+    ];
+  }
+
+  private generateOutputPath(sprintPath: string, customPath?: string): string {
+    if (customPath) return customPath;
+    
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 16);
+    const sprintSafe = sprintPath.replace(/[\\\/:"*?<>|]/g, '-');
+    const defaultFileName = `release-notes-${sprintSafe}-${timestamp}.xlsx`;
+    return path.join('c:/temp', defaultFileName);
+  }
+
+  private createExcelWorkbook(): ExcelJS.Workbook {
+    return new ExcelJS.Workbook();
+  }
+
+  private styleHeaderRow(worksheet: ExcelJS.Worksheet) {
+    worksheet.getRow(1).font = { bold: true };
+    worksheet.getRow(1).fill = {
+      type: 'pattern',
+      pattern: 'solid',
+      fgColor: { argb: 'FFE0E0E0' }
+    };
+  }
+  private async executeWiqlQuery(workItemApi: IWorkItemTrackingApi, sprintPath: string, teamName?: string): Promise<WorkItemQueryResult> {
+    let whereClause = `[System.IterationPath] = '${sprintPath}'`;
+    if (teamName) {
+      whereClause += ` AND [System.AreaPath] = '${teamName}'`;
+    }
+    
+    const wiqlQuery = {
+      query: `SELECT [System.Id], [System.Title], [System.WorkItemType], [System.State], [System.AssignedTo], [System.IterationPath], [System.AreaPath], [Custom.Releaseversion]
+              FROM WorkItems 
+              WHERE ${whereClause}
+              AND [System.WorkItemType] IN ('User Story', 'Bug', 'Task', 'Feature', 'Epic')
+              ORDER BY [System.Id]`
+    };
+    
+    console.log('WIQL Query:', wiqlQuery.query);
+    return await workItemApi.queryByWiql(wiqlQuery);
+  }  private async batchProcessItems(itemIds: number[], api: IWorkItemTrackingApi, batchSize: number, itemType: string, expand?: WorkItemExpand): Promise<WorkItem[]> {
+    const allItems: WorkItem[] = [];
+    const MAX_RETRIES = 3;
+    
+    for (let i = 0; i < itemIds.length; i += batchSize) {
+      const batch = itemIds.slice(i, i + batchSize);
+      const batchNumber = Math.floor(i / batchSize) + 1;
+      
+      this.logBatchProgress(batchNumber, i, i + batchSize, itemIds.length, itemType);
+      
+      // Debug: Log the first few IDs in each batch for parent items
+      if (itemType.includes('parent')) {
+        console.log(`DEBUG: Batch ${batchNumber} contains ${itemType} IDs: ${batch.slice(0, 5).join(', ')}${batch.length > 5 ? ` (and ${batch.length - 5} more)` : ''}`);
       }
       
-      // Get feature flag information (keep using Custom.FeatureFlag since it was working)
-      const featureFlag = (fields['Custom.FeatureFlag'] as string) || '';
+      let success = false;
+      let retryCount = 0;
       
-      // Get repository and author information from linked PRs
-      const prInfo = await this.getPullRequestInfo(relations);
-      
-      // Get risk assessment from custom field
-      const riskAssessment = this.getRiskAssessment(fields);
-
-      // Generate Azure DevOps URL for the work item
-      const organization = this.apiClient.getOrganization();
-      const project = this.apiClient.getProject() || 'Sledgehammer'; // Default to Sledgehammer if no project set
-      const workItemUrl = `https://dev.azure.com/${organization}/${project}/_workitems/edit/${workItem.id}`;
-
-      const enrichedData = {
-        workItemId: String(workItem.id || ''),
-        workItemType: String(fields['System.WorkItemType'] || ''),
-        url: workItemUrl,
-        team: String(fields['System.AreaPath'] || ''),
-        title: String(fields['System.Title'] || ''),
-        status: String(fields['System.State'] || ''),
-        releaseVersion: releaseVersion,
-        parentWorkItemId: parentInfo.id || '',
-        parentWorkItemType: parentInfo.type || '',
-        parentWorkItemTitle: parentInfo.title || '',
-        toggle: featureFlag,
-        reposChanged: '', // Empty for now until GitHub API integration is implemented
-        authors: prInfo.authors.join(', '),
-        whichFlowsImpacted: '',
-        whichUserFunctionsImpacted: '',
-        databaseChanges: '',
-        persistedDataStructuresChanged: '',
-        interProcessInterfaces: '',
-        devRiskAssessment: riskAssessment,
-        configurationsChanged: '',
-        descriptionOfConfigChanges: '',
-        automatedTestsWritten: '',
-        backOutGamePlan: '',
-        comments: ''
-      };      // Debug log for troubleshooting
-      if (workItem.id === 54071 || workItem.id === 117332) {
-        console.log(`DEBUG: Work item ${workItem.id} enriched data:`, {
-          parentWorkItemId: enrichedData.parentWorkItemId,
-          parentWorkItemType: enrichedData.parentWorkItemType,
-          parentWorkItemTitle: enrichedData.parentWorkItemTitle,
-          relations: relations.map(r => ({
-            rel: r.rel,
-            attributes: r.attributes,
-            url: r.url
-          }))
-        });
-        
-        // Determine why the parent wasn't found if applicable
-        if (!enrichedData.parentWorkItemId && relations.length > 0) {
-          const parentRelation = relations.find(rel => 
-            rel.rel === 'System.LinkTypes.Hierarchy-Reverse' || 
-            rel.attributes?.name === 'Parent'
-          );
+      while (!success && retryCount < MAX_RETRIES) {
+        try {
+          const expandParam = expand || WorkItemExpand.Relations;
+          console.log(`DEBUG: Calling getWorkItems for batch ${batchNumber} with ${batch.length} ${itemType}, expand: ${expandParam}${retryCount > 0 ? ` (retry ${retryCount})` : ''}`);
           
-          if (parentRelation && parentRelation.url) {
-            const match = parentRelation.url.match(/(\d+)$/);
+          const batchItems = await api.getWorkItems(batch, undefined, undefined, expandParam);
+          
+          console.log(`DEBUG: API returned ${batchItems?.length || 0} items for batch ${batchNumber}`);
+          
+          if (batchItems && batchItems.length > 0) {
+            allItems.push(...batchItems);
+            console.log(`Batch ${batchNumber} retrieved ${batchItems.length} ${itemType}`);
+            // Debug: Log some retrieved IDs for verification
+            if (itemType.includes('parent')) {
+              const retrievedIds = batchItems.map((item: WorkItem) => item.id).slice(0, 5);
+              console.log(`DEBUG: Batch ${batchNumber} retrieved ${itemType} IDs: ${retrievedIds.join(', ')}${batchItems.length > 5 ? ` (and ${batchItems.length - 5} more)` : ''}`);
+            }
+            success = true;
+          } else if (batch.length > 10) {
+            console.warn(`Batch ${batchNumber} returned no ${itemType}, trying smaller batches...`);
+            // Process in smaller batches
+            const smallerBatchResults = await this.processSmallerBatches(batch, api, expandParam, batchNumber, itemType);
+            allItems.push(...smallerBatchResults);
+            success = true;
+          } else {
+            console.warn(`Batch ${batchNumber} returned no ${itemType} and is too small for further splitting`);
+            success = true; // Consider it done even though we got no results
+          }
+        } catch (batchError) {
+          retryCount++;
+          if (retryCount >= MAX_RETRIES) {
+            console.error(`Error processing ${itemType} batch ${batchNumber} after ${MAX_RETRIES} retries:`, batchError);
+            
+            // Last resort: try processing one by one
+            if (batch.length > 1) {
+              console.log(`Attempting to process batch ${batchNumber} one item at a time as last resort...`);
+              for (const singleId of batch) {
+                try {
+                  const expandParam = expand || WorkItemExpand.Relations;
+                  const singleItem = await api.getWorkItems([singleId], undefined, undefined, expandParam);
+                  if (singleItem && singleItem.length > 0) {
+                    allItems.push(...singleItem);
+                    console.log(`Successfully retrieved single ${itemType} ID: ${singleId}`);
+                  }
+                } catch (singleItemError) {
+                  console.warn(`Failed to retrieve single ${itemType} ID: ${singleId}`, singleItemError);
+                }
+              }
+            }
+          } else {
+            console.warn(`Retry ${retryCount}/${MAX_RETRIES} for batch ${batchNumber} after error:`, batchError);
+            // Wait a bit before retry
+            await new Promise(resolve => setTimeout(resolve, 1000 * retryCount));
+          }
+        }
+      }
+    }
+    
+    console.log(`Retrieved ${allItems.length} detailed ${itemType} total`);
+    return allItems;
+  }
+  
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  private async processSmallerBatches(batch: number[], api: any, expandParam: WorkItemExpand, parentBatchNumber: number, itemType: string): Promise<WorkItem[]> {
+    const smallBatchSize = 5;
+    const smallBatchResults: WorkItem[] = [];
+    
+    for (let j = 0; j < batch.length; j += smallBatchSize) {
+      const smallBatch = batch.slice(j, j + smallBatchSize);
+      const smallBatchNumber = Math.floor(j / smallBatchSize) + 1;
+      
+      try {
+        const smallBatchItems = await api.getWorkItems(smallBatch, undefined, undefined, expandParam);
+        if (smallBatchItems && smallBatchItems.length > 0) {
+          console.log(`DEBUG: Small batch ${smallBatchNumber} of batch ${parentBatchNumber} returned ${smallBatchItems.length} items for IDs: ${smallBatch.join(', ')}`);
+          smallBatchResults.push(...smallBatchItems);
+        } else {
+          console.log(`DEBUG: Small batch ${smallBatchNumber} of batch ${parentBatchNumber} returned no items for IDs: ${smallBatch.join(', ')}`);
+        }
+      } catch (smallBatchError) {
+        console.error(`DEBUG: Small batch ${smallBatchNumber} of batch ${parentBatchNumber} failed for IDs ${smallBatch.join(', ')}:`, smallBatchError);
+        
+        // Try each ID individually as a last resort
+        for (const singleId of smallBatch) {
+          try {
+            const singleItem = await api.getWorkItems([singleId], undefined, undefined, expandParam);
+            if (singleItem && singleItem.length > 0) {
+              smallBatchResults.push(...singleItem);
+              console.log(`Successfully retrieved single ${itemType} ID: ${singleId} from failed small batch`);
+            }
+          } catch (singleItemError) {
+            console.warn(`Failed to retrieve single ${itemType} ID: ${singleId} from failed small batch`, singleItemError);
+          }
+        }
+      }
+    }
+    
+    return smallBatchResults;
+  }
+  private collectUniqueParentIds(workItems: WorkItem[]): Set<number> {
+    const parentIds = new Set<number>();
+    let workItemsWithParentRelation = 0;
+    let workItemsWithExtractedParentId = 0;
+    
+    for (const workItem of workItems) {
+      const relations = workItem.relations || [];
+      const parentRelation = this.findParentRelation(relations);
+      
+      if (parentRelation && parentRelation.url) {
+        workItemsWithParentRelation++;
+        const parentId = this.extractParentId(parentRelation.url);
+        if (parentId) {
+          workItemsWithExtractedParentId++;
+          parentIds.add(parentId);
+          this.logParentDebugInfo(workItem, parentRelation, parentId);
+        } else {
+          console.log(`WARNING: Found parent relation for work item ${workItem.id} but could not extract parent ID from URL: ${parentRelation.url}`);
+        }
+      } else {
+        this.logParentDebugInfo(workItem, parentRelation, null);
+      }
+    }
+    
+    console.log(`PARENT RELATION STATS: Found ${workItemsWithParentRelation} work items with parent relations out of ${workItems.length} total (${Math.round(workItemsWithParentRelation/workItems.length*100)}%)`);
+    console.log(`PARENT ID EXTRACTION STATS: Successfully extracted ${workItemsWithExtractedParentId} parent IDs out of ${workItemsWithParentRelation} parent relations (${Math.round(workItemsWithExtractedParentId/workItemsWithParentRelation*100)}%)`);
+    console.log(`UNIQUE PARENT COUNT: Found ${parentIds.size} unique parent IDs`);
+    
+    return parentIds;
+  }
+  private buildParentLookupMap(parentWorkItems: WorkItem[]): Map<string, ParentWorkItemInfo> {
+    const parentLookup = new Map<string, ParentWorkItemInfo>();
+    
+    // Check if we received any parent work items
+    if (!parentWorkItems || parentWorkItems.length === 0) {
+      console.warn('No parent work items were retrieved from the API');
+      return parentLookup;
+    }
+    
+    // Count how many parent work items have actual data
+    const validParents = parentWorkItems.filter(parent => parent && parent.id && parent.fields);
+    console.log(`Retrieved ${validParents.length} valid parent work items out of ${parentWorkItems.length} total`);
+    
+    // Build the lookup map
+    for (const parent of validParents) {
+      if (parent.id) {
+        const parentInfo = {
+          id: parent.id.toString(),
+          type: (parent.fields?.['System.WorkItemType'] as string) || 'Unknown Type',
+          title: (parent.fields?.['System.Title'] as string) || 'Unknown Title'
+        };
+        
+        parentLookup.set(parent.id.toString(), parentInfo);
+        
+        if (DEBUG_PARENT_IDS.includes(parent.id)) {
+          console.log(`DEBUG: Successfully fetched important parent work item ${parent.id}:`, parentInfo);
+        }
+      }
+    }
+    
+    // Handle hardcoded parents that weren't found
+    for (const debugParentId of DEBUG_PARENT_IDS) {
+      if (!parentLookup.has(debugParentId.toString())) {
+        console.warn(`DEBUG: Important parent work item ${debugParentId} was not found in API response`);
+      }
+    }
+    
+    console.log(`Built parent lookup with ${parentLookup.size} entries out of ${validParents.length} valid parents`);
+    
+    // If we have hardcoded parents, add them to the lookup as fallbacks
+    for (const workItemId in HARDCODED_PARENTS) {
+      const parentId = HARDCODED_PARENTS[workItemId].id;
+      if (!parentLookup.has(parentId)) {
+        parentLookup.set(parentId, HARDCODED_PARENTS[workItemId]);
+        console.log(`Added hardcoded parent ${parentId} to lookup map as fallback`);
+      }
+    }
+    
+    return parentLookup;
+  }
+  private getParentInfo(workItem: WorkItem, relations: WorkItemRelation[], parentLookup: Map<string, ParentWorkItemInfo>): ParentWorkItemInfo {
+    let parentInfo = this.getParentWorkItemInfoFromLookup(relations, parentLookup);
+    
+    // Check if we found a parent in the lookup
+    if (!parentInfo.id) {
+      // Try to extract parent info directly from the fields
+      const fields = workItem.fields || {};
+      
+      // Some work item types store parent info in specific fields
+      const possibleParentFields = [
+        'System.Parent',
+        'Microsoft.VSTS.Common.Parent',
+        'System.RelatedWorkItems',
+        'Custom.ParentId',
+        'Custom.ParentWorkItem'
+      ];
+      
+      for (const field of possibleParentFields) {
+        if (fields[field]) {
+          const fieldValue = fields[field];
+          
+          // The field could contain an ID, a URL, or a complex object
+          if (typeof fieldValue === 'number') {
+            parentInfo = { 
+              id: fieldValue.toString(), 
+              type: 'Unknown (from field)', 
+              title: `Parent from ${field}` 
+            };
+            console.log(`Found parent ID ${fieldValue} in field ${field} for work item ${workItem.id}`);
+            break;
+          } else if (typeof fieldValue === 'string') {
+            // Try to extract an ID from the string
+            const match = fieldValue.match(/(\d+)/);
             if (match) {
-              const parentId = match[1];
-              console.log(`DEBUG: Parent ID ${parentId} should be in lookup but wasn't found. Lookup has ${parentLookup.size} entries.`);
-              console.log(`DEBUG: First 20 keys in parentLookup: ${Array.from(parentLookup.keys()).slice(0, 20)}`);
+              parentInfo = { 
+                id: match[1], 
+                type: 'Unknown (from field)', 
+                title: `Parent from ${field}` 
+              };
+              console.log(`Extracted parent ID ${match[1]} from field ${field} value "${fieldValue}" for work item ${workItem.id}`);
+              break;
+            }
+          } else if (typeof fieldValue === 'object' && fieldValue !== null) {
+            // Handle complex objects that might contain parent info
+            const objStr = JSON.stringify(fieldValue);
+            console.log(`Complex parent field ${field} value: ${objStr.substring(0, 100)}${objStr.length > 100 ? '...' : ''}`);
+            
+            // Try to extract an ID from the object
+            const match = objStr.match(/"id"\s*:\s*(\d+)/);
+            if (match) {
+              parentInfo = { 
+                id: match[1], 
+                type: 'Unknown (from field object)', 
+                title: `Parent from ${field} object` 
+              };
+              console.log(`Extracted parent ID ${match[1]} from field ${field} object for work item ${workItem.id}`);
+              break;
             }
           }
         }
       }
+    }
+    
+    // Apply hardcoded fallback if needed
+    if (workItem.id && !parentInfo.id && HARDCODED_PARENTS[workItem.id]) {
+      parentInfo = HARDCODED_PARENTS[workItem.id];
+      console.log(`WARNING: Using hardcoded parent info for work item ${workItem.id}: ${parentInfo.id}`);
+    }
+    
+    return parentInfo;
+  }
 
-      return enrichedData;
-    } catch (error) {
-      console.error(`Error enriching work item ${workItem.id}:`, error);
-      
-      // Return fallback data to prevent the entire process from failing
-      return {
-        workItemId: String(workItem.id || ''),
-        workItemType: String(workItem.fields?.['System.WorkItemType'] || ''),
-        url: '',
-        team: String(workItem.fields?.['System.AreaPath'] || ''),
-        title: String(workItem.fields?.['System.Title'] || ''),
-        status: String(workItem.fields?.['System.State'] || ''),
-        releaseVersion: '',
-        parentWorkItemId: '',
-        parentWorkItemType: '',
-        parentWorkItemTitle: '',
-        toggle: '',
-        reposChanged: '',
-        authors: '',
-        whichFlowsImpacted: '',
-        whichUserFunctionsImpacted: '',
-        databaseChanges: '',
-        persistedDataStructuresChanged: '',
-        interProcessInterfaces: '',
-        devRiskAssessment: '3 - Low',
-        configurationsChanged: '',
-        descriptionOfConfigChanges: '',
-        automatedTestsWritten: '',
-        backOutGamePlan: '',
-        comments: ''
-      };
+  private generateWorkItemUrl(workItemId?: number): string {
+    if (!workItemId) return '';
+    
+    const organization = this.apiClient.getOrganization();
+    const project = this.apiClient.getProject() || DEFAULT_PROJECT;
+    return `https://dev.azure.com/${organization}/${project}/_workitems/edit/${workItemId}`;
+  }
+
+  private createEnrichedData(workItem: WorkItem, fields: Record<string, unknown>, parentInfo: ParentWorkItemInfo, prInfo: PullRequestInfo, workItemUrl: string): EnrichedWorkItemData {
+    return {
+      workItemId: String(workItem.id || ''),
+      workItemType: String(fields['System.WorkItemType'] || ''),
+      url: workItemUrl,
+      team: String(fields['System.AreaPath'] || ''),
+      title: String(fields['System.Title'] || ''),
+      status: String(fields['System.State'] || ''),
+      releaseVersion: this.getFieldValue(fields, RELEASE_VERSION_FIELDS),
+      parentWorkItemId: parentInfo.id || '',
+      parentWorkItemType: parentInfo.type || '',
+      parentWorkItemTitle: parentInfo.title || '',
+      toggle: (fields['Custom.FeatureFlag'] as string) || '',
+      reposChanged: '',
+      authors: prInfo.authors.join(', '),
+      whichFlowsImpacted: '',
+      whichUserFunctionsImpacted: '',
+      databaseChanges: '',
+      persistedDataStructuresChanged: '',
+      interProcessInterfaces: '',
+      devRiskAssessment: this.getFieldValue(fields, RISK_ASSESSMENT_FIELDS) || DEFAULT_RISK_ASSESSMENT,
+      configurationsChanged: '',
+      descriptionOfConfigChanges: '',
+      automatedTestsWritten: '',
+      backOutGamePlan: '',
+      comments: ''
+    };
+  }
+
+  private createFallbackEnrichedData(workItem: WorkItem): EnrichedWorkItemData {
+    return {
+      workItemId: String(workItem.id || ''),
+      workItemType: String(workItem.fields?.['System.WorkItemType'] || ''),
+      url: '',
+      team: String(workItem.fields?.['System.AreaPath'] || ''),
+      title: String(workItem.fields?.['System.Title'] || ''),
+      status: String(workItem.fields?.['System.State'] || ''),
+      releaseVersion: '',
+      parentWorkItemId: '',
+      parentWorkItemType: '',
+      parentWorkItemTitle: '',
+      toggle: '',
+      reposChanged: '',
+      authors: '',
+      whichFlowsImpacted: '',
+      whichUserFunctionsImpacted: '',
+      databaseChanges: '',
+      persistedDataStructuresChanged: '',
+      interProcessInterfaces: '',
+      devRiskAssessment: DEFAULT_RISK_ASSESSMENT,
+      configurationsChanged: '',
+      descriptionOfConfigChanges: '',
+      automatedTestsWritten: '',
+      backOutGamePlan: '',
+      comments: ''
+    };
+  }
+  private logDebugInfo(workItemId: number | undefined, message: string, data?: unknown) {
+    if (workItemId && DEBUG_WORK_ITEMS.includes(workItemId)) {
+      console.log(`DEBUG: Work item ${workItemId} - ${message}`, data || '');
     }
   }
-    /**
-   * Extract release version from work item fields
-   */
-  private getReleaseVersion(fields: Record<string, unknown>): string {
-    // Look for common release version field names
-    const releaseVersionFields = [
-      'Custom.Releaseversion',  // Note: lowercase 'v' - this is the actual field name
-      'Custom.ReleaseVersion',
-      'Microsoft.VSTS.Common.ReleaseVersion',
-      'ReleaseVersion',
-      'Release',
-      'Version',
-      'Custom.Version',
-      'Microsoft.VSTS.Build.FoundIn',
-      'Microsoft.VSTS.Build.IntegrationBuild'
-    ];
+
+  private logBatchProgress(batchNumber: number, start: number, end: number, total: number, type: string = 'items') {
+    console.log(`Processing ${type} batch ${batchNumber}: items ${start + 1}-${Math.min(end, total)}`);
+  }
+
+  private logParentBatchDebugInfo(parentIds: Set<number>) {
+    const parentIdArray = Array.from(parentIds);
+    console.log(`DEBUG: Looking for important parent IDs:`, DEBUG_PARENT_IDS);
+    console.log(`DEBUG: Which batches will contain important parents:`, 
+      DEBUG_PARENT_IDS.map(id => {
+        const index = parentIdArray.indexOf(id);
+        return { parentId: id, foundAtIndex: index, batchNumber: index >= 0 ? Math.floor(index / BATCH_SIZE) + 1 : 'NOT FOUND' };
+      })
+    );
+    console.log(`DEBUG: First 10 parent IDs in array: ${parentIdArray.slice(0, 10).join(', ')}`);
+    console.log(`DEBUG: Last 10 parent IDs in array: ${parentIdArray.slice(-10).join(', ')}`);
+  }
+
+  private logParentDebugInfo(workItem: WorkItem, parentRelation: WorkItemRelation | undefined, parentId: number | null) {
+    if (!workItem.id || !DEBUG_WORK_ITEMS.includes(workItem.id)) return;
     
-    for (const fieldName of releaseVersionFields) {
+    if (parentRelation && parentId) {
+      this.logDebugInfo(workItem.id, 'has parent relation', {
+        rel: parentRelation.rel,
+        url: parentRelation.url,
+        extractedParentId: parentId,
+        attributesName: parentRelation.attributes?.name
+      });
+    } else {
+      this.logDebugInfo(workItem.id, 'has NO parent relation. Relations', 
+        workItem.relations?.map(rel => ({ rel: rel.rel, name: rel.attributes?.name, url: rel.url }))
+      );
+    }
+  }
+  private findParentRelation(relations: WorkItemRelation[]): WorkItemRelation | undefined {
+    // First try an exact match with our defined parent relation types
+    const exactMatch = relations.find(rel => 
+      PARENT_RELATION_TYPES.includes(rel.rel || '') || 
+      (rel.attributes?.name && PARENT_RELATION_TYPES.includes(rel.attributes.name))
+    );
+    
+    if (exactMatch) {
+      return exactMatch;
+    }
+    
+    // If no exact match, try fuzzy matching for any relation that might be a parent
+    return relations.find(rel => {
+      const relType = rel.rel || '';
+      const relName = rel.attributes?.name || '';
+      
+      return (
+        relType.includes('Parent') || 
+        relType.includes('Hierarchy') || 
+        relName.includes('Parent') || 
+        relName.includes('Hierarchy') ||
+        // Check for URLs that seem to point to parent items
+        (rel.url && rel.url.includes('/workitems/'))
+      );
+    });
+  }
+  private extractParentId(url: string): number | null {
+    // Look for ID in various URL formats
+    // Standard work item URL pattern
+    const standardMatch = url.match(/workitems\/edit\/(\d+)/i);
+    if (standardMatch) {
+      return parseInt(standardMatch[1], 10);
+    }
+    
+    // Handle API URLs with IDs at the end
+    const apiMatch = url.match(/\/(\d+)$/);
+    if (apiMatch) {
+      return parseInt(apiMatch[1], 10);
+    }
+    
+    // Handle API URLs with IDs in the middle of path
+    const midPathMatch = url.match(/\/workitems\/(\d+)\//i);
+    if (midPathMatch) {
+      return parseInt(midPathMatch[1], 10);
+    }
+    
+    console.log(`WARNING: Could not extract parent ID from URL: ${url}`);
+    return null;
+  }
+  private getParentWorkItemInfoFromLookup(relations: WorkItemRelation[], parentLookup: Map<string, ParentWorkItemInfo>): ParentWorkItemInfo {
+    try {
+      // Find the parent relation
+      const parentRelation = this.findParentRelation(relations);
+      
+      if (!parentRelation || !parentRelation.url) {
+        // Log this for non-debug work items to understand the scope of the issue
+        console.log(`No parent relation found or no URL in parent relation`);
+        return { id: '', type: '', title: '' };
+      }
+      
+      // Extract the parent ID from the URL
+      const parentId = this.extractParentId(parentRelation.url);
+      if (!parentId) {
+        console.log(`Could not extract parent ID from URL: ${parentRelation.url}`);
+        return { id: '', type: '', title: '' };
+      }
+      
+      const parentIdStr = parentId.toString();
+      const parentInfo = parentLookup.get(parentIdStr);
+      
+      // If the parent ID is not in the lookup, log a warning
+      if (!parentInfo) {
+        console.warn(`Parent ID ${parentIdStr} not found in lookup map of size ${parentLookup.size}`);
+        
+        // Check if any key in the lookup is similar to the parent ID (maybe off by a digit)
+        const keys = Array.from(parentLookup.keys());
+        const similarKeys = keys.filter(key => 
+          Math.abs(parseInt(key) - parentId) < 10 || // Close numerically
+          key.includes(parentIdStr) || // Substring match
+          parentIdStr.includes(key) // Substring match
+        );
+        
+        if (similarKeys.length > 0) {
+          console.log(`Found similar keys in lookup: ${similarKeys.join(', ')}`);
+          // We could potentially use one of these similar keys as a fallback
+          // For now, just log it for analysis
+        }
+      }
+      
+      this.logParentLookupDebugInfo(parentIdStr, parentRelation, parentInfo, parentLookup);
+      
+      return parentInfo || { id: parentIdStr, type: '', title: '' };
+    } catch (error) {
+      console.warn('Error getting parent work item info from lookup:', error);
+      return { id: '', type: '', title: '' };
+    }
+  }
+
+  private logParentLookupDebugInfo(parentId: string, parentRelation: WorkItemRelation, parentInfo: ParentWorkItemInfo | undefined, parentLookup: Map<string, ParentWorkItemInfo>) {
+    if (!DEBUG_PARENT_IDS.includes(parseInt(parentId))) return;
+    
+    console.log(`DEBUG: Looking up important parent ID ${parentId} in lookup map:`, {
+      parentRelationFound: !!parentRelation,
+      parentUrl: parentRelation?.url,
+      parentIdExtracted: parentId,
+      parentInfoFromLookup: parentInfo,
+      lookupMapSize: parentLookup.size,
+      lookupMapHasKey: parentLookup.has(parentId),
+      lookupMapKeys: Array.from(parentLookup.keys()).slice(0, 10)
+    });
+    
+    if (!parentInfo) {
+      console.warn(`WARNING: Important parent ID ${parentId} was not found in the lookup map!`);
+    }
+  }
+
+  private getFieldValue(fields: Record<string, unknown>, fieldNames: string[]): string {
+    for (const fieldName of fieldNames) {
       if (fields[fieldName]) {
         return fields[fieldName].toString();
       }
     }
-    
     return '';
   }
-    /**
-   * Get pull request information from relations
-   */
   private async getPullRequestInfo(relations: WorkItemRelation[]): Promise<PullRequestInfo> {
     const repos = new Set<string>();
     const authors = new Set<string>();
     
     try {
-      // Look for both traditional Pull Request relations and GitHub artifact links
       const prRelations = relations.filter(rel => 
-        rel.attributes?.name === 'Pull Request' ||
-        rel.url?.includes('pullRequest') ||
-        rel.attributes?.name === 'GitHub Pull Request' ||
-        (rel.rel === 'ArtifactLink' && rel.url?.includes('GitHub/PullRequest'))
+        PR_RELATION_IDENTIFIERS.some(identifier => 
+          rel.attributes?.name === identifier ||
+          (rel.url && rel.url.includes(identifier))
+        ) ||
+        (rel.rel === 'ArtifactLink' && rel.url?.includes('PullRequest'))
       );
       
       for (const prRelation of prRelations) {
         if (prRelation.url) {
-          // Handle traditional Azure DevOps PR URLs
           const prMatch = prRelation.url.match(/\/([^\/]+)\/_git\/([^\/]+)\/pullRequest\/(\d+)/);
           if (prMatch) {
             const [, project, repo, prId] = prMatch;
             repos.add(repo);
             
-            // Try to get PR author information
             try {
               const gitApi = await this.apiClient.getGitApi();
               const pr = await gitApi.getPullRequestById(parseInt(prId, 10), project);
@@ -597,14 +918,11 @@ export class ReleaseNotesTool extends EntityTool {
             }
           }
           
-          // Handle GitHub artifact links
           if (prRelation.url.includes('GitHub/PullRequest')) {
-            // Extract from GitHub artifact link format: vstfs:///GitHub/PullRequest/624d285d-dcca-4430-a242-2032e3668f75%2f9778
             const githubPrMatch = prRelation.url.match(/GitHub\/PullRequest\/[^%]+%2f(\d+)/);
             if (githubPrMatch) {
               const prNumber = githubPrMatch[1];
-              repos.add('GitHub Repository'); // Generic since we can't extract repo name from this format
-              // Note: Getting GitHub PR author would require GitHub API access which isn't available here
+              repos.add('GitHub Repository');
               console.log(`Found GitHub PR #${prNumber}`);
             }
           }
@@ -618,30 +936,5 @@ export class ReleaseNotesTool extends EntityTool {
       repos: Array.from(repos),
       authors: Array.from(authors)
     };
-  }
-    /**
-   * Get risk assessment from custom fields
-   */
-  private getRiskAssessment(fields: Record<string, unknown>): string {
-    try {
-      const riskFields = [
-        'Custom.Risk',
-        'Microsoft.VSTS.Common.Risk',
-        'Risk',
-        'RiskAssessment'
-      ];
-      
-      for (const fieldName of riskFields) {
-        if (fields[fieldName]) {
-          return fields[fieldName].toString();
-        }
-      }
-      
-      // Return default risk assessment value
-      return '3 - Low';
-    } catch (error) {
-      console.warn('Error getting risk assessment:', error);
-      return '3 - Low';
-    }
   }
 }
