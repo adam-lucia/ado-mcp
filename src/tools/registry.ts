@@ -49,10 +49,11 @@ export class ToolRegistry {
     this.apiClient = apiClient;
     this.initializeTools();
   }
-
   /**
    * Initialize all tools
-   */  private initializeTools(): void {    // Define the core entity tools we know we'll support
+   */
+  private initializeTools(): void {
+    // Define the core entity tools we know we'll support
     const coreTools = [
       EntityToolFactory.createProjectsTool(this.apiClient),
       EntityToolFactory.createRepositoriesTool(this.apiClient),
@@ -60,6 +61,7 @@ export class ToolRegistry {
       EntityToolFactory.createPullRequestsTool(this.apiClient),
       EntityToolFactory.createPipelinesTool(this.apiClient),
       EntityToolFactory.createReleaseNotesTool(this.apiClient),
+      EntityToolFactory.createWiqlQueryTool(this.apiClient),
     ];
     
     // Register all core entity tools

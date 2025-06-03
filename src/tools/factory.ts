@@ -3,6 +3,7 @@ import { ADOApiClient } from '../api/client/index.js';
 import { handleApiError, normalizePaginationParams, PaginationParams } from '../api/utils/index.js';
 import { EntityTool } from './entity-tool.base.js';
 import { ReleaseNotesTool } from './release-notes.tool.js';
+import { WiqlQueryTool } from './wiql-query.tool.js';
 
 /**
  * Operation type for entity tools
@@ -626,12 +627,21 @@ export class EntityToolFactory {
     }
       return new PipelinesTool(apiClient);
   }
-
   /**
    * Create a release notes tool
    * @param apiClient API client
    * @returns Release notes tool
-   */  static createReleaseNotesTool(apiClient: ADOApiClient): EntityTool {
+   */
+  static createReleaseNotesTool(apiClient: ADOApiClient): EntityTool {
     return new ReleaseNotesTool(apiClient);
   }
+
+  /**
+   * Create a WIQL query tool
+   * @param apiClient API client
+   * @returns WIQL query tool
+   */
+  static createWiqlQueryTool(apiClient: ADOApiClient): EntityTool {
+    return new WiqlQueryTool(apiClient);
   }
+}
