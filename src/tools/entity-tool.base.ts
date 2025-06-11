@@ -28,7 +28,6 @@ export abstract class EntityTool implements Tool {
     this.operations = {};
     this.schemas = {};
   }
-
   /**
    * Get the tool definition with enhanced descriptions
    * @returns Tool definition
@@ -48,7 +47,7 @@ export abstract class EntityTool implements Tool {
       const schema = this.schemas[operation];
       let schemaProperties: Record<string, any> = {};
       let schemaRequired: string[] = [];
-      
+
       if (schema instanceof z.ZodObject) {
         const schemaDescription = this.generateSchemaDescription(schema);
         schemaProperties = schemaDescription.properties;
@@ -59,7 +58,7 @@ export abstract class EntityTool implements Tool {
         type: 'object',
         description: this.operationDescriptions?.[operation] || `Parameters for ${operation} operation`,
         properties: schemaProperties,
-        required: schemaRequired,
+        ...(schemaRequired.length > 0 ? { required: schemaRequired } : {}),
       };
     }
 
@@ -135,75 +134,18 @@ export abstract class EntityTool implements Tool {
     try {
       // Extract shape from schema
       const shape = schema._def.shape();
-      
-      // Process each property
+        // Process each property
       for (const [key, value] of Object.entries(shape)) {
-        const fieldDef = (value as any)._def;
-        
-        // Check if required (handle optional and nullable types)
-        const isOptional = fieldDef.typeName === 'ZodOptional' || 
-                          (fieldDef.innerType && fieldDef.innerType._def.typeName === 'ZodOptional');
+        // Unwrap the actual type from optional/default wrappers
+        const { actualType, isOptional, description } = this.unwrapZodType(value as any);
         
         if (!isOptional) {
           required.push(key);
         }
         
-        // Get the actual type, unwrapping optional/nullable wrappers
-        let actualType = value as any;
-        if (fieldDef.typeName === 'ZodOptional' && fieldDef.innerType) {
-          actualType = fieldDef.innerType;
-        }
-        const actualDef = actualType._def;
-        
-        // Get property type and description
-        let type = 'string';
-        let description = '';
-        let enumValues: any[] | undefined = undefined;
-        let nestedProperties: Record<string, any> | undefined = undefined;
-        let nestedRequired: string[] | undefined = undefined;
-        
-        if (actualDef.typeName === 'ZodString') {
-          type = 'string';
-        } else if (actualDef.typeName === 'ZodNumber') {
-          type = 'number';
-        } else if (actualDef.typeName === 'ZodBoolean') {
-          type = 'boolean';
-        } else if (actualDef.typeName === 'ZodArray') {
-          type = 'array';
-        } else if (actualDef.typeName === 'ZodObject') {
-          type = 'object';
-          // Recursively process nested object
-          const nestedSchema = this.generateSchemaDescription(actualType);
-          nestedProperties = nestedSchema.properties;
-          nestedRequired = nestedSchema.required;
-        } else if (actualDef.typeName === 'ZodEnum') {
-          type = 'string';
-          enumValues = actualDef.values;
-        }
-        
-        // Get description from metadata
-        if (actualType.description) {
-          description = actualType.description;
-        }
-        
-        // Create property definition
-        const propertyDef: any = {
-          type,
-          description,
-        };
-        
-        // Add enum values if available
-        if (enumValues) {
-          propertyDef.enum = enumValues;
-        }
-        
-        // Add nested properties for objects
-        if (nestedProperties) {
-          propertyDef.properties = nestedProperties;
-          if (nestedRequired && nestedRequired.length > 0) {
-            propertyDef.required = nestedRequired;
-          }
-        }
+        // Get property type and other details
+        const propertyDef = this.getJsonSchemaProperty(actualType);
+        propertyDef.description = description;
         
         properties[key] = propertyDef;
       }
@@ -212,6 +154,103 @@ export abstract class EntityTool implements Tool {
     } catch (error) {
       console.warn('Error generating schema description:', error);
       return { properties: {}, required: [] };
+    }
+  }
+
+  /**
+   * Unwrap a Zod type to get the actual base type, optional status, and description
+   * @param zodType The Zod type to unwrap
+   * @returns Object with actualType, isOptional, and description
+   */
+  private unwrapZodType(zodType: any): { actualType: any; isOptional: boolean; description: string } {
+    let currentType = zodType;
+    let isOptional = false;
+    let description = '';
+    
+    // Keep unwrapping until we get to the base type
+    while (currentType._def) {
+      const def = currentType._def;
+      
+      // Collect description if available
+      if (currentType.description && !description) {
+        description = currentType.description;
+      }
+      
+      // Handle different wrapper types
+      switch (def.typeName) {
+        case 'ZodOptional':
+          isOptional = true;
+          currentType = def.innerType;
+          break;
+        case 'ZodDefault':
+          isOptional = true; // defaults are always optional
+          currentType = def.innerType;
+          break;
+        case 'ZodNullable':
+          currentType = def.innerType;
+          break;
+        default:
+          // We've reached the base type
+          return { actualType: currentType, isOptional, description };
+      }
+    }
+    
+    return { actualType: currentType, isOptional, description };
+  }
+  
+  /**
+   * Convert a Zod type to JSON Schema property definition
+   * @param zodType The unwrapped Zod type
+   * @returns JSON Schema property definition
+   */
+  private getJsonSchemaProperty(zodType: any): any {
+    const def = zodType._def;
+    
+    switch (def.typeName) {
+      case 'ZodString':
+        return { type: 'string' };
+      
+      case 'ZodNumber':
+        return { type: 'number' };
+      
+      case 'ZodBoolean':
+        return { type: 'boolean' };
+      
+      case 'ZodArray':
+        const elementType = def.type;
+        const itemsSchema = this.getJsonSchemaProperty(elementType);
+        return {
+          type: 'array',
+          items: itemsSchema
+        };
+      
+      case 'ZodObject':
+        const nestedSchema = this.generateSchemaDescription(zodType);
+        const result: any = {
+          type: 'object',
+          properties: nestedSchema.properties
+        };
+        if (nestedSchema.required.length > 0) {
+          result.required = nestedSchema.required;
+        }
+        return result;
+      
+      case 'ZodEnum':
+        return {
+          type: 'string',
+          enum: def.values
+        };
+      
+      case 'ZodLiteral':
+        return {
+          type: typeof def.value,
+          enum: [def.value]
+        };
+      
+      default:
+        // Fallback to string for unknown types
+        console.warn(`Unknown Zod type: ${def.typeName}, defaulting to string`);
+        return { type: 'string' };
     }
   }
 
