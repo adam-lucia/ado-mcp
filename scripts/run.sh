@@ -1,19 +1,34 @@
 #!/bin/bash
 set -e
 
-# This script runs the Azure DevOps MCP server locally for development and testing
+# Azure DevOps MCP Server Startup Script
+# Supports two modes:
+# 1. Local stdio mode (default): Direct Node.js execution with stdio
+# 2. Containerized stdio mode: Docker container with mcpo HTTP wrapper
 
 # Parse command line arguments
 CONFIG_PATH=""
 INTERACTIVE=true
 USE_DOCKER=false
+USE_MCPO=false
 
 while [[ "$#" -gt 0 ]]; do
     case $1 in
         --config) CONFIG_PATH="$2"; shift ;;
         --non-interactive) INTERACTIVE=false ;;
         --docker) USE_DOCKER=true ;;
-        *) echo "Unknown parameter: $1"; exit 1 ;;
+        --mcpo) USE_MCPO=true; USE_DOCKER=true ;;
+        --help) 
+            echo "Usage: $0 [options]"
+            echo "Options:"
+            echo "  --config PATH        Path to azuredevops.json config file"
+            echo "  --non-interactive    Run without TTY allocation"
+            echo "  --docker             Run in Docker container (stdio mode)"
+            echo "  --mcpo               Run in Docker with mcpo HTTP wrapper"
+            echo "  --help               Show this help message"
+            exit 0
+            ;;
+        *) echo "Unknown parameter: $1. Use --help for usage."; exit 1 ;;
     esac
     shift
 done
@@ -25,8 +40,36 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 if [ "$USE_DOCKER" = true ]; then
-    # Docker mode - similar to original run-local.sh
+    # Docker mode - supports both stdio-only and mcpo wrapper
     
+    # Determine which Docker image/setup to use
+    if [ "$USE_MCPO" = true ]; then
+        echo -e "${BLUE}Starting containerized MCP server with mcpo HTTP wrapper...${NC}"
+        
+        # Check if docker-compose.mcpo.yml exists
+        if [ ! -f "docker-compose.mcpo.yml" ]; then
+            echo -e "${YELLOW}docker-compose.mcpo.yml not found. Building mcpo container directly...${NC}"
+            
+            # Check if the mcpo Docker image exists
+            if ! docker image inspect azure-devops-mcp:mcpo &>/dev/null; then
+                echo "MCPO Docker image not found. Building it first..."
+                docker build -f Dockerfile.mcpo -t azure-devops-mcp:mcpo .
+            fi
+            
+            # Run with mcpo wrapper
+            docker run --rm -it -p 8000:8000 \
+                -e ADO_ORGANIZATION="${ADO_ORGANIZATION:-DFIN}" \
+                -e ADO_PROJECT="${ADO_PROJECT:-Sledgehammer}" \
+                -e ADO_PAT="${ADO_PAT}" \
+                azure-devops-mcp:mcpo
+        else
+            echo "Using docker-compose for mcpo setup..."
+            docker-compose -f docker-compose.mcpo.yml up
+        fi
+        exit 0
+    fi
+    
+    # Standard Docker stdio mode (original functionality)
     # Check if the Docker image exists
     if ! docker image inspect azure-devops-mcp:local &>/dev/null; then
         echo "Local Docker image not found. Building it first..."
@@ -79,8 +122,8 @@ if [ "$USE_DOCKER" = true ]; then
         VOLUMES+=("-v" "$CONFIG_DIR:/app/config")
     fi
     
-    # Run the Docker container
-    echo -e "${GREEN}Starting Azure DevOps MCP server in Docker...${NC}"
+    # Run the Docker container (stdio mode)
+    echo -e "${GREEN}Starting Azure DevOps MCP server in Docker (stdio mode)...${NC}"
     
     if [ "$INTERACTIVE" = true ]; then
         # Interactive mode with TTY
@@ -90,7 +133,7 @@ if [ "$USE_DOCKER" = true ]; then
         docker run --rm "${ENV_VARS[@]}" "${VOLUMES[@]}" azure-devops-mcp:local
     fi
 else
-    # Node.js mode - direct execution
+    # Local stdio mode - direct Node.js execution
     
     # Check if build exists
     if [ ! -f "build/index.js" ]; then
@@ -130,7 +173,7 @@ else
         echo -e "${YELLOW}No config file specified. Using environment variables if set.${NC}"
     fi
     
-    # Run the server
-    echo -e "${GREEN}Starting Azure DevOps MCP server with Node.js...${NC}"
+    # Run the stdio MCP server
+    echo -e "${GREEN}Starting Azure DevOps MCP server with Node.js (stdio mode)...${NC}"
     node build/index.js
 fi

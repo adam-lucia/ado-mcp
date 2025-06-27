@@ -8,6 +8,7 @@ import { McpError, ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  InitializeRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { ADOApiClient } from '../api/client/index.js';
@@ -21,6 +22,20 @@ import { ToolRegistry } from '../tools/registry.js';
 export function registerRequestHandlers(server: Server, apiClient: ADOApiClient): void {
   // Create tool registry
   const toolRegistry = new ToolRegistry(apiClient);
+  
+  // Initialize handler - required for MCP protocol
+  server.setRequestHandler(InitializeRequestSchema, async (_request) => {
+    return {
+      protocolVersion: "2024-11-05",
+      capabilities: {
+        tools: {},
+      },
+      serverInfo: {
+        name: "azure-devops-mcp-server",
+        version: "0.1.0",
+      },
+    };
+  });
   
   // List tools handler
   server.setRequestHandler(ListToolsRequestSchema, async () => {

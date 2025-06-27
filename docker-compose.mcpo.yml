@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  ado-mcp-mcpo:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcpo
+    ports:
+      - "8000:8000"
+    environment:
+      # Azure DevOps Configuration
+      - ADO_ORGANIZATION=${ADO_ORGANIZATION:-DFIN}
+      - ADO_PROJECT=${ADO_PROJECT:-Sledgehammer}
+      - ADO_PAT=${ADO_PAT}
+      - ADO_API_RETRY_MAX=${ADO_API_RETRY_MAX:-3}
+      - ADO_API_RETRY_DELAY=${ADO_API_RETRY_DELAY:-1000}
+      - ADO_API_RETRY_BACKOFF=${ADO_API_RETRY_BACKOFF:-2}
+      
+      # mcpo Configuration
+      - API_KEY=${API_KEY:-default-key}
+    
+    env_file:
+      - .env
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'

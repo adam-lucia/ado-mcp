@@ -1,5 +1,5 @@
 # Build stage
-FROM node:20.11-bullseye AS builder
+FROM node:20-bullseye AS builder
 
 # Install build dependencies
 ENV NODE_ENV=development
@@ -14,8 +14,8 @@ COPY . .
 # Install dependencies and build
 RUN npm ci && npm run build
 
-# Production stage
-FROM node:20.11-bullseye
+# Production stage  
+FROM node:20-bullseye
 ENV NODE_ENV=production
 WORKDIR /app
 COPY --from=builder /app/build ./build
@@ -23,7 +23,5 @@ COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/config ./config
 RUN npm ci --only=production
 
-COPY docker-entrypoint.sh /usr/local/bin/
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
-ENTRYPOINT ["docker-entrypoint.sh"]
+# This container runs the stdio MCP server directly
+ENTRYPOINT ["node", "build/index.js"]
