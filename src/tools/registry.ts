@@ -49,7 +49,6 @@ export class ToolRegistry {
     this.apiClient = apiClient;
     this.initializeTools();
   }
-
   /**
    * Initialize all tools
    */
@@ -61,6 +60,8 @@ export class ToolRegistry {
       EntityToolFactory.createWorkItemsTool(this.apiClient),
       EntityToolFactory.createPullRequestsTool(this.apiClient),
       EntityToolFactory.createPipelinesTool(this.apiClient),
+      EntityToolFactory.createReleaseNotesTool(this.apiClient),
+      EntityToolFactory.createWiqlQueryTool(this.apiClient),
     ];
     
     // Register all core entity tools
