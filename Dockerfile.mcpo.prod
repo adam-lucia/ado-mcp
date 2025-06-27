@@ -1,0 +1,39 @@
+# Production Dockerfile for ADO MCP with MCPO
+# Self-contained build - no external dependencies required
+
+# Stage 1: Build the MCP server
+FROM node:20-bullseye-slim AS mcp-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    git \
+    build-essential \
+    python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Copy package files and install dependencies
+COPY package*.json ./
+RUN npm ci
+
+# Copy source code and build
+COPY . .
+RUN npm run build
+
+# Stage 2: Create production image with mcpo
+FROM ghcr.io/open-webui/mcpo:main
+
+# Set working directory
+WORKDIR /app
+
+# Copy built MCP server from builder stage
+COPY --from=mcp-builder /app/build ./build
+COPY --from=mcp-builder /app/package*.json ./
+COPY --from=mcp-builder /app/config ./config
+
+# Install only production dependencies in the mcpo container
+RUN npm ci --omit=dev
+
+# Set default command (can be overridden by docker-compose)
+CMD ["--port", "8000", "--api-key", "default-key", "--", "node", "/app/build/index.js"]

@@ -1,8 +1,10 @@
 version: '3.8'
 
 services:
-  ado-mcp-mcpo:
-    image: ghcr.io/open-webui/mcpo:main
+  ado-mcp-mcpo-prod:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcpo.prod
     ports:
       - "8000:8000"
     environment:
@@ -13,26 +15,20 @@ services:
       - ADO_API_RETRY_MAX=${ADO_API_RETRY_MAX:-3}
       - ADO_API_RETRY_DELAY=${ADO_API_RETRY_DELAY:-1000}
       - ADO_API_RETRY_BACKOFF=${ADO_API_RETRY_BACKOFF:-2}
-    
     env_file:
       - .env
-    
-    volumes:
-      # Mount the built MCP server and its dependencies
-      - ./build:/app/build:ro
-      - ./config:/app/config:ro
-      - ./node_modules:/app/node_modules:ro
-      - ./package.json:/app/package.json:ro
-    
-    working_dir: /app
-    
-    command: ["--port", "8000", "--api-key", "vscode-test-key", "--", "node", "/app/build/index.js"]
-    
+    command: ["--port", "8000", "--api-key", "${API_KEY:-vscode-test-key}", "--", "node", "/app/build/index.js"]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-    
     restart: unless-stopped
+    
+    # Resource limits for production
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
