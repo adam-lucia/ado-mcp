@@ -75,7 +75,7 @@ This guide explains how to:
      ```
    - For **API Key**, enter:
      ```
-     azure-devops-mcp-server
+     default-key
      ```
    - Save the connection.
 
