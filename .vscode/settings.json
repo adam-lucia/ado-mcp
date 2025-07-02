@@ -1,0 +1,14 @@
+{
+  "mcp.servers": {
+    "ado-mcp-local": {
+      "command": "curl",
+      "args": [
+        "-X", "POST",
+        "-H", "Content-Type: application/json",
+        "-H", "Authorization: Bearer vscode-test-key",
+        "http://localhost:8000/mcp/session"
+      ],
+      "transport": "http"
+    }
+  }
+}

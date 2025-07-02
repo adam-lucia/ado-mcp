@@ -1,0 +1,45 @@
+version: "3.8"
+
+services:
+  ado-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcpo.prod
+    container_name: ado-mcp
+    ports:
+      - "8000:8000"
+    environment:
+      - ADO_ORGANIZATION=${ADO_ORGANIZATION:-DFIN}
+      - ADO_PROJECT=${ADO_PROJECT:-Sledgehammer}
+      - ADO_PAT=${ADO_PAT}
+      - ADO_API_RETRY_MAX=${ADO_API_RETRY_MAX:-3}
+      - ADO_API_RETRY_DELAY=${ADO_API_RETRY_DELAY:-1000}
+      - ADO_API_RETRY_BACKOFF=${ADO_API_RETRY_BACKOFF:-2}
+      - API_KEY=${API_KEY:-vscode-test-key}
+    env_file:
+      - .env
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    ports:
+      - "3000:8080"
+    environment:
+      - WEBUI_AUTH=False
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_API_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai
+    volumes:
+      - open-webui:/app/backend/data
+    depends_on:
+      - ado-mcp
+    restart: unless-stopped
+
+volumes:
+  open-webui:
