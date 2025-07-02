@@ -11,7 +11,7 @@ This guide explains how to:
 
 ### Prerequisites
 
-- You have a valid Gemini API key (example: `AIzaSyD8HCYHvV7QQDNPDp-N4PxNt4klrET_KWE`)
+- You have a valid Gemini API key (example: `AIt4kKWElrET_N4PxNzaSyD8HCYHvV7Q-QDNPDp`)
 - You are running Open WebUI via Docker Compose or similar
 
 ### Steps
